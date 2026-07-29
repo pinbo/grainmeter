@@ -284,3 +284,7 @@ threads completed in about 1 second in testing.
   or known-size disc in the scan) — DPI is taken as ground truth from the
   scanner setting, which is accurate as long as your scanner driver isn't
   lying about its resolution.
+
+
+## Acknowledgement
+This app used [OpenCV](https://opencv.org/) library and was written with the help of [Claude AI](https://claude.ai/).
