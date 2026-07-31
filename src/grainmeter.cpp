@@ -65,7 +65,6 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
-#include <glob.h>
 
 namespace fs = std::filesystem;
 
@@ -86,6 +85,7 @@ struct Options {
     double seedSeparationMm = 2.0;  // min distance enforced between distinct seed peaks
     double seedMergeMm = 2.0;       // merge distance for same-peak "salt" -- raise if grains still over-split
     double creaseCloseMm = 0.6;     // pre-seeding closing to bridge creases/notches within one grain
+    double minSolidity = 0.0;       // region convexity (area / convex-hull area) below this triggers a forced re-split attempt; 0 disables this check (off by default -- see README for why 0.75 wasn't safe as a default)
     bool debug = false;
     unsigned int threads = 0;   // 0 = auto (hardware_concurrency)
 };
@@ -98,6 +98,7 @@ struct Grain {
     cv::Point2f centroid;
     bool touchesBorder;
     double meanR, meanG, meanB; // 0-255, sampled from the original image
+    double solidity;            // areaPx / convex-hull area; 1.0 = perfectly convex (oval-like), lower = concave (e.g. a "peanut" shape from two touching grains)
 };
 
 // All console output goes through this so lines from different worker
@@ -108,8 +109,11 @@ static void say(std::ostream& os, const std::string& s) {
     os << s;
 }
 
+static const char* GRAINMETER_VERSION = "1.1.0";
+
 static void printUsage(const char* prog) {
     std::cout <<
+        "grainmeter v" << GRAINMETER_VERSION << "\n"
         "Usage: " << prog << " --input <image> [<image> ...] [options]\n"
         "\n"
         "Required:\n"
@@ -155,10 +159,22 @@ static void printUsage(const char* prog) {
         "                            if a visible crease is still splitting grains;\n"
         "                            lower (or disable) if grains that genuinely\n"
         "                            touch are being merged into one.\n"
+        "  --min-solidity <n>        Regions less convex/oval-shaped than this\n"
+        "                            (contour area / convex-hull area) get a forced\n"
+        "                            re-split attempt even if their area looks\n"
+        "                            normal -- catches touching pairs that happen to\n"
+        "                            sum to a plausible single-grain area (default 0,\n"
+        "                            i.e. off; range 0-1). Off by default because\n"
+        "                            real single grains commonly measure 0.80-0.95\n"
+        "                            due to natural texture/crease/asymmetry, so an\n"
+        "                            enabled default risked flagging ordinary grains\n"
+        "                            as needing a split; 0.75 is a reasonable value\n"
+        "                            to try if you want it on -- see the README.\n"
         "  --threads <n>             Parallel worker threads for batch processing\n"
         "                            (default: number of CPU cores)\n"
         "  --debug                   Write intermediate mask images for tuning\n"
-        "  --help                    Show this message\n";
+        "  --help                    Show this message\n"
+        "  --version                 Show version number and exit\n";
 }
 
 static bool parseArgs(int argc, char** argv, Options& o) {
@@ -191,9 +207,11 @@ static bool parseArgs(int argc, char** argv, Options& o) {
         else if (a == "--seed-separation-mm") o.seedSeparationMm = std::stod(next("--seed-separation-mm"));
         else if (a == "--seed-merge-mm") o.seedMergeMm = std::stod(next("--seed-merge-mm"));
         else if (a == "--crease-close-mm") o.creaseCloseMm = std::stod(next("--crease-close-mm"));
+        else if (a == "--min-solidity") o.minSolidity = std::stod(next("--min-solidity"));
         else if (a == "--threads") o.threads = static_cast<unsigned int>(std::stoul(next("--threads")));
         else if (a == "--debug") o.debug = true;
         else if (a == "--help") { printUsage(argv[0]); std::exit(0); }
+        else if (a == "--version") { std::cout << "grainmeter v" << GRAINMETER_VERSION << "\n"; std::exit(0); }
         else { std::cerr << "Unknown argument: " << a << "\n"; printUsage(argv[0]); std::exit(1); }
     }
     if (o.rawInputs.empty()) {
@@ -204,29 +222,73 @@ static bool parseArgs(int argc, char** argv, Options& o) {
     return true;
 }
 
+// Simple glob-style wildcard match ('*' = any run of characters, '?' = any
+// single character) of `name` against `pattern`. Standard greedy-backtrack
+// matcher, O(pattern * name) worst case.
+static bool wildcardMatch(const std::string& pattern, const std::string& name) {
+    size_t p = 0, n = 0, star = std::string::npos, matchFrom = 0;
+    while (n < name.size()) {
+        if (p < pattern.size() && (pattern[p] == '?' || pattern[p] == name[n])) {
+            ++p; ++n;
+        } else if (p < pattern.size() && pattern[p] == '*') {
+            star = p++;
+            matchFrom = n;
+        } else if (star != std::string::npos) {
+            p = star + 1;
+            n = ++matchFrom;
+        } else {
+            return false;
+        }
+    }
+    while (p < pattern.size() && pattern[p] == '*') ++p;
+    return p == pattern.size();
+}
+
 // Expand a single --input token: if it contains glob metacharacters, expand
-// it with glob(3) (covers the common case of a *quoted* pattern like
-// "*.jpg" that the shell passed through literally). Otherwise treat it as
-// a literal path. Unquoted globs (e.g. --input *.jpg) are typically already
-// expanded into multiple argv tokens by the shell before we ever see them,
-// which also works fine since each expanded token has no wildcard chars.
+// it against the files in its directory (covers the common case of a
+// *quoted* pattern like "*.jpg" that the shell passed through literally,
+// and is also required on Windows, where neither cmd.exe nor PowerShell
+// expand wildcards for external programs the way Unix shells do -- this
+// implementation is what makes --input *.jpg work at all there). Otherwise
+// treat the token as a literal path. Unquoted globs on Unix shells (e.g.
+// --input *.jpg) are typically already expanded into multiple argv tokens
+// by the shell before we ever see them, which also works fine since each
+// expanded token then has no wildcard characters left in it.
+//
+// Deliberately implemented with std::filesystem + a small hand-written
+// matcher instead of POSIX glob(3): glob.h isn't available on Windows
+// (neither with MSVC nor reliably with MinGW), and this way the exact same
+// source builds and behaves identically on Linux, macOS, and Windows with
+// no #ifdefs. The one feature this doesn't replicate from glob(3) is `~`
+// (home directory) expansion, since that's a shell convention with no
+// equivalent on Windows anyway.
 static std::vector<std::string> expandOneInput(const std::string& pattern) {
     std::vector<std::string> out;
-    bool hasWildcard = pattern.find_first_of("*?[") != std::string::npos;
+    bool hasWildcard = pattern.find_first_of("*?") != std::string::npos;
     if (!hasWildcard) {
         std::error_code ec;
         if (fs::exists(pattern, ec)) out.push_back(pattern);
         else std::cerr << "Warning: input file not found, skipping: " << pattern << "\n";
         return out;
     }
-    glob_t g{};
-    int rc = glob(pattern.c_str(), GLOB_TILDE, nullptr, &g);
-    if (rc == 0) {
-        for (size_t i = 0; i < g.gl_pathc; ++i) out.push_back(g.gl_pathv[i]);
-    } else {
+
+    fs::path patternPath(pattern);
+    fs::path dir = patternPath.has_parent_path() ? patternPath.parent_path() : fs::path(".");
+    std::string filePattern = patternPath.filename().string();
+
+    std::error_code ec;
+    if (!fs::is_directory(dir, ec)) {
+        std::cerr << "Warning: no files matched pattern: " << pattern << "\n";
+        return out;
+    }
+    for (const auto& entry : fs::directory_iterator(dir, ec)) {
+        if (!entry.is_regular_file(ec)) continue;
+        std::string name = entry.path().filename().string();
+        if (wildcardMatch(filePattern, name)) out.push_back(entry.path().string());
+    }
+    if (out.empty()) {
         std::cerr << "Warning: no files matched pattern: " << pattern << "\n";
     }
-    globfree(&g);
     return out;
 }
 
@@ -498,28 +560,42 @@ static bool measureGrainRegion(const cv::Mat& bgrFull, const GrainRegion& region
 
     cv::Vec3d rgb = meanColorRGB(bgrFull(region.bboxGlobal), region.maskLocal);
 
+    // Solidity: how much of this region's convex hull is actually filled.
+    // A single grain, being roughly oval, is close to convex (solidity near
+    // 1.0). Two touching grains form a pinched "peanut" shape -- concave at
+    // the waist -- which drags solidity down measurably even when the total
+    // area looks like a perfectly normal single grain, so this catches
+    // touching pairs the area-based check alone would miss.
+    std::vector<cv::Point> hull;
+    cv::convexHull(*biggest, hull);
+    double hullArea = cv::contourArea(hull);
+    double solidity = (hullArea > 0) ? (area / hullArea) : 1.0;
+
     out.areaPx = area;
     out.lengthPx = std::max(rect.size.width, rect.size.height);
     out.widthPx = std::min(rect.size.width, rect.size.height);
     out.centroid = centroid;
     out.touchesBorder = border;
     out.meanR = rgb[0]; out.meanG = rgb[1]; out.meanB = rgb[2];
+    out.solidity = solidity;
     return true;
 }
 
-// If a region's area exceeds --max-area-mm2, it's very likely two or more
-// grains that the main watershed pass failed to separate (their peaks were
-// too close together for --seed-separation-mm). Rather than discarding
-// it, this retries watershed on just that region with progressively
-// tighter seed spacing until it actually splits, then recurses into each
-// resulting piece in case it's a cluster of 3+ grains rather than just 2.
-// If no amount of tightening produces a split, it's most likely a single
-// genuinely large object; it's kept as one region either way -- this
-// function always adds something to `outGrains` for a valid region, it
-// never silently drops an oversized one.
+// If a region's area exceeds --max-area-mm2, OR its shape is too concave
+// to plausibly be one grain (solidity below --min-solidity -- see the
+// comment in measureGrainRegion), it's very likely two or more grains that
+// the main watershed pass failed to separate (their peaks were too close
+// together for --seed-separation-mm). Rather than discarding it, this
+// retries watershed on just that region with progressively tighter seed
+// spacing until it actually splits, then recurses into each resulting
+// piece in case it's a cluster of 3+ grains rather than just 2. If no
+// amount of tightening produces a split, it's kept as one region either
+// way -- this function always adds something to `outGrains` for a valid
+// region, it never silently drops one.
 static void processRegionRecursive(const cv::Mat& bgrFull, const GrainRegion& region, double pxPerMm,
                                     const Options& opt, int imgCols, int imgRows, int depth,
-                                    std::vector<Grain>& outGrains, const std::string& tag) {
+                                    std::vector<Grain>& outGrains, int& oversizedBeforeSplitCount,
+                                    const std::string& tag) {
     Grain g;
     if (!measureGrainRegion(bgrFull, region, imgCols, imgRows, g)) return;
 
@@ -529,27 +605,63 @@ static void processRegionRecursive(const cv::Mat& bgrFull, const GrainRegion& re
     static const double kShrinkFactors[] = {1.5, 2.0, 3.0, 4.0, 6.0};
     const int kMaxSplitDepth = 4;
 
-    if (areaMm2 > opt.maxAreaMm2 && depth < kMaxSplitDepth) {
+    bool oversized = areaMm2 > opt.maxAreaMm2;
+    bool notOvalShaped = opt.minSolidity > 0.0 && g.solidity < opt.minSolidity;
+
+    // Counted here, before the retry loop, so this reflects every region
+    // that *started out* oversized -- whether or not the forced re-split
+    // below went on to fix it. That's the useful number for deciding
+    // whether to raise --max-area-mm2: a high count means many regions
+    // are routinely landing above the threshold in the first place, which
+    // either means real grains are bigger than the threshold assumes, or
+    // (if most of them DO end up splitting successfully) that touching
+    // pairs are common in this scan and the threshold is doing its job.
+    // Compare against "Still oversized after split attempts" in the
+    // summary: a big gap between the two means splitting is usually
+    // succeeding; numbers close together mean it usually isn't.
+    if (oversized) oversizedBeforeSplitCount++;
+
+    if ((oversized || notOvalShaped) && depth < kMaxSplitDepth) {
         cv::Mat bgrCrop = bgrFull(region.bboxGlobal);
+        // Oversized-by-area is a strong, unambiguous signal, so that retry
+        // stays as aggressive as possible (crease-closing off, same as
+        // before this feature was added). A concave-but-normal-area shape
+        // is a softer signal that could also be a genuinely single grain
+        // with a pronounced crease -- keep crease-closing on during that
+        // retry so a real crease still gets bridged into one seed the same
+        // way it would on the initial pass, and only a genuine touching
+        // pair (whose "waist" isn't explained by a mm-scale crease) ends
+        // up actually splitting.
+        double creaseCloseForRetry = oversized ? 0.0 : opt.creaseCloseMm;
         for (double f : kShrinkFactors) {
             double sep = std::max(0.3, opt.seedSeparationMm / f);
             double merge = std::max(0.15, opt.seedMergeMm / f);
-            // No crease-closing here: that step exists to stop a single
-            // grain's own notch from over-splitting it, which is the
-            // opposite of what a forced re-split is trying to achieve.
             cv::Mat subMarkers = watershedSplit(bgrCrop, region.maskLocal, pxPerMm, sep, merge,
-                                                 0.0, false, tag);
+                                                 creaseCloseForRetry, false, tag);
             auto subRegions = extractLabelRegions(subMarkers, region.bboxGlobal);
             if (subRegions.size() >= 2) {
+                if (opt.debug && notOvalShaped && !oversized) {
+                    std::ostringstream ss;
+                    ss << "[debug] " << tag << " SPLIT (solidity-triggered) region at ("
+                       << region.bboxGlobal.x << "," << region.bboxGlobal.y << ") solidity="
+                       << g.solidity << " into " << subRegions.size() << " pieces\n";
+                    say(std::cerr, ss.str());
+                }
                 for (auto& sr : subRegions) {
-                    processRegionRecursive(bgrFull, sr, pxPerMm, opt, imgCols, imgRows, depth + 1, outGrains, tag);
+                    processRegionRecursive(bgrFull, sr, pxPerMm, opt, imgCols, imgRows, depth + 1, outGrains, oversizedBeforeSplitCount, tag);
                 }
                 return;
             }
         }
         // Couldn't force a split at any tried spacing -- fall through and
-        // keep it as a single (still oversized) region rather than
-        // dropping it.
+        // keep it as a single region rather than dropping it.
+        if (opt.debug && notOvalShaped) {
+            std::ostringstream ss;
+            ss << "[debug] " << tag << " region at (" << region.bboxGlobal.x << "," << region.bboxGlobal.y
+               << ") stayed non-oval after split attempts: solidity=" << g.solidity
+               << " area_mm2=" << areaMm2 << "\n";
+            say(std::cerr, ss.str());
+        }
     }
 
     outGrains.push_back(g);
@@ -563,6 +675,7 @@ struct ImageResult {
     double meanLengthMm = 0.0;
     double meanWidthMm = 0.0;
     double meanR = 0.0, meanG = 0.0, meanB = 0.0;
+    int oversizedBeforeSplit = 0;
 };
 
 // Full single-image pipeline: segment, measure, write CSV + annotated image.
@@ -599,6 +712,7 @@ static ImageResult processImage(const std::string& inputPath, const Options& opt
 
     std::vector<Grain> grains;
     cv::Mat annotated = bgr.clone();
+    int oversizedBeforeSplitCount = 0;
 
     if (opt.useWatershed) {
         say(std::cerr, "[" + tag + "] Splitting touching grains (watershed)...\n");
@@ -611,7 +725,7 @@ static ImageResult processImage(const std::string& inputPath, const Options& opt
             say(std::cerr, ss.str());
         }
         for (auto& region : regions) {
-            processRegionRecursive(bgr, region, pxPerMm, opt, bgr.cols, bgr.rows, 0, grains, tag);
+            processRegionRecursive(bgr, region, pxPerMm, opt, bgr.cols, bgr.rows, 0, grains, oversizedBeforeSplitCount, tag);
         }
     } else {
         say(std::cerr, "[" + tag + "] Finding contours (watershed disabled)...\n");
@@ -635,6 +749,10 @@ static ImageResult processImage(const std::string& inputPath, const Options& opt
             for (auto& p : c) shifted[0].push_back(p - bbox.tl());
             cv::drawContours(localMask, shifted, 0, cv::Scalar(255), cv::FILLED);
             cv::Vec3d rgb = meanColorRGB(bgr(bbox), localMask);
+            std::vector<cv::Point> hull;
+            cv::convexHull(c, hull);
+            double hullArea = cv::contourArea(hull);
+            double solidity = (hullArea > 0) ? (area / hullArea) : 1.0;
 
             Grain g;
             g.areaPx = area;
@@ -643,23 +761,26 @@ static ImageResult processImage(const std::string& inputPath, const Options& opt
             g.centroid = centroid;
             g.touchesBorder = border;
             g.meanR = rgb[0]; g.meanG = rgb[1]; g.meanB = rgb[2];
+            g.solidity = solidity;
             grains.push_back(g);
         }
     }
 
     say(std::cerr, "[" + tag + "] Filtering and writing results...\n");
     std::vector<Grain> kept;
-    int rejectedSize = 0, rejectedBorder = 0, stillOversized = 0;
+    int rejectedSize = 0, rejectedBorder = 0, stillOversized = 0, stillNotOvalShaped = 0;
     for (auto& g : grains) {
         double areaMm2 = g.areaPx * mm2PerPx2;
-        // Oversized regions were already given a chance to split in
-        // processRegionRecursive() above (watershed branch) -- they are no
-        // longer rejected here, only counted, since the point of that step
-        // is to keep them (split into pieces where possible) rather than
-        // discard them. Only undersized regions (dust/debris) are dropped.
+        // Oversized/non-oval-shaped regions were already given a chance to
+        // split in processRegionRecursive() above (watershed branch) --
+        // they are no longer rejected here, only counted, since the point
+        // of that step is to keep them (split into pieces where possible)
+        // rather than discard them. Only undersized regions (dust/debris)
+        // are dropped.
         if (areaMm2 < opt.minAreaMm2) { rejectedSize++; continue; }
         if (opt.excludeBorder && g.touchesBorder) { rejectedBorder++; continue; }
         if (areaMm2 > opt.maxAreaMm2) stillOversized++;
+        if (opt.minSolidity > 0.0 && g.solidity < opt.minSolidity) stillNotOvalShaped++;
         kept.push_back(g);
     }
 
@@ -737,8 +858,12 @@ static ImageResult processImage(const std::string& inputPath, const Options& opt
     out << "Rejected (too small):               " << rejectedSize << "\n";
     if (opt.excludeBorder)
         out << "Rejected (touching image border):   " << rejectedBorder << "\n";
+    if (oversizedBeforeSplitCount > 0)
+        out << "Oversized before split attempts:    " << oversizedBeforeSplitCount << "\n";
     if (stillOversized > 0)
         out << "Still oversized after split attempts (kept, not discarded): " << stillOversized << "\n";
+    if (stillNotOvalShaped > 0)
+        out << "Still not oval-shaped after split attempts (kept, not discarded): " << stillNotOvalShaped << "\n";
     out << "Grains counted:                     " << kept.size() << "\n\n";
 
     out << "                mean      median    stdev     min       max\n";
@@ -765,6 +890,7 @@ static ImageResult processImage(const std::string& inputPath, const Options& opt
     result.meanR = meanOf(colorsR);
     result.meanG = meanOf(colorsG);
     result.meanB = meanOf(colorsB);
+    result.oversizedBeforeSplit = oversizedBeforeSplitCount;
     return result;
 }
 
@@ -834,7 +960,7 @@ int main(int argc, char** argv) {
 
         std::ofstream summary(summaryPath);
         summary << "filename,seed_count,mean_area_mm2,mean_length_mm,mean_width_mm,"
-                   "mean_r,mean_g,mean_b\n";
+                   "mean_r,mean_g,mean_b,oversized_before_split\n";
         summary << std::fixed;
         for (size_t i = 0; i < files.size(); ++i) {
             const ImageResult& r = results[i];
@@ -846,13 +972,14 @@ int main(int argc, char** argv) {
 
             summary << "\"" << escaped << "\",";
             if (!r.ok) {
-                summary << "0,,,,,,\n"; // failed file: seed count 0, blank averages
+                summary << "0,,,,,,,\n"; // failed file: seed count 0, blank averages
                 continue;
             }
             summary << r.grainCount << ","
                     << std::setprecision(4) << r.meanAreaMm2 << ","
                     << r.meanLengthMm << "," << r.meanWidthMm << ","
-                    << std::setprecision(1) << r.meanR << "," << r.meanG << "," << r.meanB
+                    << std::setprecision(1) << r.meanR << "," << r.meanG << "," << r.meanB << ","
+                    << r.oversizedBeforeSplit
                     << "\n";
         }
         summary.close();
