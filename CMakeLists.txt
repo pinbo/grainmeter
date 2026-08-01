@@ -41,3 +41,18 @@ endif()
 message(STATUS "OpenCV libs (linked, restricted to used modules): ${GRAINMETER_OPENCV_LIBS}")
 
 target_link_libraries(grainmeter PRIVATE ${GRAINMETER_OPENCV_LIBS} Threads::Threads)
+
+if(APPLE)
+  # `cmake --build build --target standalone` as a shortcut for
+  # scripts/package_macos_standalone.sh, which bundles OpenCV's dylibs
+  # next to the built binary (and rewrites its load commands to use them)
+  # so the result runs on a Mac without OpenCV installed. See the
+  # README's "Distributing to a Mac without OpenCV installed" section.
+  add_custom_target(standalone
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/package_macos_standalone.sh ${CMAKE_BINARY_DIR}
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    DEPENDS grainmeter
+    COMMENT "Bundling OpenCV dependencies for standalone distribution"
+    VERBATIM
+  )
+endif()
