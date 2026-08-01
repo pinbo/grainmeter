@@ -6,6 +6,8 @@ mean color** — the same job GrainScan does, but built to run natively on
 Linux, macOS, and Windows (GrainScan itself only runs on Windows), with
 batch and multi-threaded processing built in.
 
+![example](example_annotated.png)
+
 ## How it works
 
 1. Grayscale + Otsu threshold, auto-detecting whether grains are darker or
@@ -520,3 +522,7 @@ before, confirming they're purely visual with no effect on detection.
   or known-size disc in the scan) — DPI is taken as ground truth from the
   scanner setting, which is accurate as long as your scanner driver isn't
   lying about its resolution.
+
+
+## Acknowledgement
+This app used [OpenCV](https://opencv.org/) library and was written with the help of [Claude AI](https://claude.ai/).
