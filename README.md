@@ -6,8 +6,6 @@ mean color** — the same job GrainScan does, but built to run natively on
 Linux, macOS, and Windows (GrainScan itself only runs on Windows), with
 batch and multi-threaded processing built in.
 
-![example](example_annotated.jpg)
-
 ## How it works
 
 1. Grayscale + Otsu threshold, auto-detecting whether grains are darker or
@@ -197,6 +195,10 @@ Full options:
                                  grain's own crease/notch (0 disables)       (0.6)
 --min-solidity <n>              Non-oval regions get a forced re-split
                                  attempt (0-1, 0 disables)                   (0, off)
+--color-seeds                   Distinct fill/outline color per grain in
+                                 the annotated image (GrainScan-style)       (off)
+--show-ids                      Draw each grain's id number in the
+                                 annotated image                             (off)
 --threads <n>                   Parallel worker threads for batch
                                  processing                                  (CPU core count)
 --debug                         Dump intermediate mask/distance images
@@ -218,8 +220,27 @@ e.g. `wheat_plot12.jpg` → `results/wheat_plot12.csv` and
 `results/wheat_plot12_annotated.jpg`.
 
 The annotated image outlines each kept grain in green with a red dot at
-its centroid and its id number in green next to it, so you can visually
-cross-check the count and catch any obviously wrong splits/merges.
+its centroid, so you can visually cross-check the count and catch any
+obviously wrong splits/merges. Each grain's outline comes from its own
+individually measured region, so a touching pair that watershed correctly
+split into two grains is drawn as two separate outlines, not one merged
+outline around the whole original cluster.
+
+`--show-ids` (default off) additionally draws each grain's id number next
+to its dot, in white or black depending on which gives better contrast
+against the scan's detected background. Off by default because on a
+scan with hundreds of grains the numbers get busy fast and mostly aren't
+needed for a routine QC pass — turn it on when you need to cross-reference
+a specific grain between the image and its row in the CSV.
+
+`--color-seeds` (default off) replaces the plain green outline with a
+GrainScan-style view: each grain gets its own distinct color (stepped
+around the color wheel so neighboring ids look different), semi-transparent
+filled over the grain so its texture stays faintly visible, with a solid
+outline of the same color around it. Off by default because a single
+consistent color is easier to read at a glance for routine QC; turn it on
+when you specifically want to visually distinguish individual grains
+touching a neighbor, e.g. to spot-check a dense cluster.
 
 `--out-csv`/`--out-image` let you override both per-grain output paths
 explicitly, but only apply when exactly one input file is given — with
@@ -468,6 +489,25 @@ writing results) so a large scan doesn't look stuck while it's processing.
 Batch mode with 3 files (including one full-page-size scan) using 3
 threads completed in about 1 second in testing.
 
+The annotated-image changes (background-contrasting id labels off by
+default via `--show-ids`, per-grain outlines, `--color-seeds`) were
+checked by pixel-sampling the actual output rather than by eye alone: on
+the real dark-background reference image, the default output (no id
+labels) came back with only ~22 near-white pixels — essentially zero,
+consistent with the labels genuinely being absent rather than just small
+— while `--show-ids` produced ~50k near-white pixels, in the expected
+ballpark for a font roughly half the linear size of an earlier version
+that had produced ~159k (font area shrinks faster than linear size, so
+a 50% size cut plus a thinner stroke landing around a 3x pixel-count
+reduction is consistent with the math, not just a rough guess). The same
+check confirmed black text renders correctly on a light-background
+synthetic test too. `--color-seeds` output was checked for genuine color
+diversity by sampling real pixel values across a dense touching cluster
+(distinctly different hues came back at each sample point, not a single
+repeated color). All of the counting/measurement regression tests above
+were re-run after these changes and produced identical grain counts to
+before, confirming they're purely visual with no effect on detection.
+
 ## Known limitations vs. GrainScan
 
 - Heavily overlapping grains (>~40% overlap) can still be under-split, or
@@ -480,6 +520,3 @@ threads completed in about 1 second in testing.
   or known-size disc in the scan) — DPI is taken as ground truth from the
   scanner setting, which is accurate as long as your scanner driver isn't
   lying about its resolution.
-
-## Acknowledgement
-This app used [OpenCV](https://opencv.org/) library and was written with the help of [Claude AI](https://claude.ai/).

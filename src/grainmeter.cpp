@@ -86,6 +86,8 @@ struct Options {
     double seedMergeMm = 2.0;       // merge distance for same-peak "salt" -- raise if grains still over-split
     double creaseCloseMm = 0.6;     // pre-seeding closing to bridge creases/notches within one grain
     double minSolidity = 0.0;       // region convexity (area / convex-hull area) below this triggers a forced re-split attempt; 0 disables this check (off by default -- see README for why 0.75 wasn't safe as a default)
+    bool colorSeeds = false;        // give each grain a distinct fill/outline color in the annotated image (off by default; a single green outline is easier to read for most uses)
+    bool showIds = false;           // draw each grain's id number in the annotated image (off by default; the numbers get busy on dense scans -- the outline/dot/color alone is usually enough for a QC pass)
     bool debug = false;
     unsigned int threads = 0;   // 0 = auto (hardware_concurrency)
 };
@@ -99,6 +101,10 @@ struct Grain {
     bool touchesBorder;
     double meanR, meanG, meanB; // 0-255, sampled from the original image
     double solidity;            // areaPx / convex-hull area; 1.0 = perfectly convex (oval-like), lower = concave (e.g. a "peanut" shape from two touching grains)
+    cv::Rect regionBboxGlobal;  // this grain's own mask, for accurate per-grain outline drawing --
+    cv::Mat regionMaskLocal;    // NOT the same as re-finding contours on the raw threshold mask, which
+                                 // would merge a touching cluster's grains back into one outline even
+                                 // after watershed correctly split them into separate counted grains.
 };
 
 // All console output goes through this so lines from different worker
@@ -109,7 +115,7 @@ static void say(std::ostream& os, const std::string& s) {
     os << s;
 }
 
-static const char* GRAINMETER_VERSION = "1.1.0";
+static const char* GRAINMETER_VERSION = "1.2.0";
 
 static void printUsage(const char* prog) {
     std::cout <<
@@ -170,6 +176,13 @@ static void printUsage(const char* prog) {
         "                            enabled default risked flagging ordinary grains\n"
         "                            as needing a split; 0.75 is a reasonable value\n"
         "                            to try if you want it on -- see the README.\n"
+        "  --color-seeds              Give each grain in the annotated image a\n"
+        "                            distinct fill/outline color instead of a plain\n"
+        "                            green outline (GrainScan-style; default off)\n"
+        "  --show-ids                 Draw each grain's id number in the annotated\n"
+        "                            image (default off; the outline/dot/color alone\n"
+        "                            is usually enough for a QC pass, and the\n"
+        "                            numbers get busy on dense scans)\n"
         "  --threads <n>             Parallel worker threads for batch processing\n"
         "                            (default: number of CPU cores)\n"
         "  --debug                   Write intermediate mask images for tuning\n"
@@ -208,6 +221,8 @@ static bool parseArgs(int argc, char** argv, Options& o) {
         else if (a == "--seed-merge-mm") o.seedMergeMm = std::stod(next("--seed-merge-mm"));
         else if (a == "--crease-close-mm") o.creaseCloseMm = std::stod(next("--crease-close-mm"));
         else if (a == "--min-solidity") o.minSolidity = std::stod(next("--min-solidity"));
+        else if (a == "--color-seeds") o.colorSeeds = true;
+        else if (a == "--show-ids") o.showIds = true;
         else if (a == "--threads") o.threads = static_cast<unsigned int>(std::stoul(next("--threads")));
         else if (a == "--debug") o.debug = true;
         else if (a == "--help") { printUsage(argv[0]); std::exit(0); }
@@ -317,13 +332,17 @@ static void deriveDefaultPaths(const std::string& inputPath, const std::string& 
 // Otsu-threshold in both directions and pick whichever gives the smaller
 // foreground area fraction -- grains are normally the minority class on a
 // scanner bed. Can be overridden with --polarity dark|light.
-static cv::Mat autoThreshold(const cv::Mat& gray, const std::string& polarity, bool debug, const std::string& tag) {
+// Also reports which polarity was chosen via outBackgroundIsDark, so the
+// caller can pick a contrasting color (e.g. white text on a dark backing
+// board) without re-deriving it separately.
+static cv::Mat autoThreshold(const cv::Mat& gray, const std::string& polarity, bool debug,
+                              const std::string& tag, bool& outBackgroundIsDark) {
     cv::Mat binDark, binLight;
-    cv::threshold(gray, binDark, 0, 255, cv::THRESH_BINARY_INV | cv::THRESH_OTSU); // grains darker than bg
-    cv::threshold(gray, binLight, 0, 255, cv::THRESH_BINARY | cv::THRESH_OTSU);    // grains lighter than bg
+    cv::threshold(gray, binDark, 0, 255, cv::THRESH_BINARY_INV | cv::THRESH_OTSU); // grains darker than bg (bg light)
+    cv::threshold(gray, binLight, 0, 255, cv::THRESH_BINARY | cv::THRESH_OTSU);    // grains lighter than bg (bg dark)
 
-    if (polarity == "dark") return binDark;
-    if (polarity == "light") return binLight;
+    if (polarity == "dark") { outBackgroundIsDark = false; return binDark; }
+    if (polarity == "light") { outBackgroundIsDark = true; return binLight; }
 
     double fracDark = static_cast<double>(cv::countNonZero(binDark)) / (gray.rows * gray.cols);
     double fracLight = static_cast<double>(cv::countNonZero(binLight)) / (gray.rows * gray.cols);
@@ -333,7 +352,9 @@ static cv::Mat autoThreshold(const cv::Mat& gray, const std::string& polarity, b
            << " light-hypothesis=" << fracLight << "\n";
         say(std::cerr, ss.str());
     }
-    return (fracDark < fracLight) ? binDark : binLight;
+    bool chooseDark = (fracDark < fracLight); // grains darker than background => background is light
+    outBackgroundIsDark = !chooseDark;
+    return chooseDark ? binDark : binLight;
 }
 
 // Split touching grains with a distance-transform + marker-based watershed.
@@ -467,6 +488,20 @@ static cv::Vec3d meanColorRGB(const cv::Mat& bgrRoi, const cv::Mat& mask8u) {
     return cv::Vec3d(m[2], m[1], m[0]);
 }
 
+// A visually distinct BGR color for grain index `i`, for --color-seeds.
+// Steps hue by the golden angle (~137.5 degrees) so consecutive indices
+// land far apart around the color wheel; unlike splitting the wheel into
+// N even slices, this doesn't need to know the total grain count up front
+// and still stays well-separated for any number of grains.
+static cv::Scalar distinctColorBGR(int i) {
+    double hueDeg = std::fmod(i * 137.508, 360.0);
+    cv::Mat hsv(1, 1, CV_8UC3, cv::Scalar(hueDeg / 2.0, 200, 255)); // OpenCV 8-bit hue range is 0-179
+    cv::Mat bgr;
+    cv::cvtColor(hsv, bgr, cv::COLOR_HSV2BGR);
+    cv::Vec3b c = bgr.at<cv::Vec3b>(0, 0);
+    return cv::Scalar(c[0], c[1], c[2]);
+}
+
 // A single labeled region from a watershed marker image, kept as a small
 // local crop (bboxGlobal in full-image coordinates) plus a CV_8U 0/255
 // mask of exactly that label's pixels within the crop. Working with small
@@ -578,6 +613,8 @@ static bool measureGrainRegion(const cv::Mat& bgrFull, const GrainRegion& region
     out.touchesBorder = border;
     out.meanR = rgb[0]; out.meanG = rgb[1]; out.meanB = rgb[2];
     out.solidity = solidity;
+    out.regionBboxGlobal = region.bboxGlobal;
+    out.regionMaskLocal = region.maskLocal.clone();
     return true;
 }
 
@@ -702,7 +739,8 @@ static ImageResult processImage(const std::string& inputPath, const Options& opt
         ss << "[" << tag << "] Loaded image: " << bgr.cols << "x" << bgr.rows << " px. Segmenting...\n";
         say(std::cerr, ss.str());
     }
-    cv::Mat binary = autoThreshold(gray, opt.polarity, opt.debug, tag);
+    bool backgroundIsDark = false;
+    cv::Mat binary = autoThreshold(gray, opt.polarity, opt.debug, tag, backgroundIsDark);
 
     cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3, 3));
     cv::morphologyEx(binary, binary, cv::MORPH_OPEN, kernel, cv::Point(-1, -1), 1);
@@ -762,6 +800,8 @@ static ImageResult processImage(const std::string& inputPath, const Options& opt
             g.touchesBorder = border;
             g.meanR = rgb[0]; g.meanG = rgb[1]; g.meanB = rgb[2];
             g.solidity = solidity;
+            g.regionBboxGlobal = bbox;
+            g.regionMaskLocal = localMask.clone();
             grains.push_back(g);
         }
     }
@@ -821,15 +861,50 @@ static ImageResult processImage(const std::string& inputPath, const Options& opt
     }
     csv.close();
 
+    cv::Scalar idTextColor = backgroundIsDark ? cv::Scalar(255, 255, 255) : cv::Scalar(0, 0, 0);
+
     for (auto& g : kept) {
+        // Recover this grain's own contour from its stored mask (not the
+        // raw un-split threshold mask), so a touching cluster that
+        // watershed correctly split into separate counted grains shows
+        // each grain's own boundary here too, instead of one merged
+        // outline around the whole original cluster.
+        if (!g.regionMaskLocal.empty()) {
+            std::vector<std::vector<cv::Point>> regionContours;
+            cv::findContours(g.regionMaskLocal, regionContours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+            if (!regionContours.empty()) {
+                auto biggest = std::max_element(regionContours.begin(), regionContours.end(),
+                    [](const std::vector<cv::Point>& a, const std::vector<cv::Point>& b) {
+                        return cv::contourArea(a) < cv::contourArea(b);
+                    });
+                std::vector<cv::Point> shifted;
+                shifted.reserve(biggest->size());
+                for (auto& p : *biggest) shifted.push_back(p + g.regionBboxGlobal.tl());
+                std::vector<std::vector<cv::Point>> toDraw = {shifted};
+
+                if (opt.colorSeeds) {
+                    cv::Scalar color = distinctColorBGR(g.id);
+                    // Semi-transparent fill within this grain's own mask
+                    // (GrainScan-style per-particle highlight -- original
+                    // grain texture stays faintly visible underneath),
+                    // plus a solid outline in the same color around it.
+                    cv::Mat roi = annotated(g.regionBboxGlobal);
+                    cv::Mat colorLayer(roi.size(), roi.type(), color);
+                    cv::Mat blended;
+                    cv::addWeighted(roi, 0.45, colorLayer, 0.55, 0, blended);
+                    blended.copyTo(roi, g.regionMaskLocal);
+                    cv::drawContours(annotated, toDraw, -1, color, 2);
+                } else {
+                    cv::drawContours(annotated, toDraw, -1, cv::Scalar(0, 255, 0), 1);
+                }
+            }
+        }
+
         cv::circle(annotated, g.centroid, 6, cv::Scalar(0, 0, 255), -1);
-        cv::putText(annotated, std::to_string(g.id), g.centroid + cv::Point2f(4, -4),
-                    cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(0, 255, 0), 1, cv::LINE_AA);
-    }
-    {
-        std::vector<std::vector<cv::Point>> contours;
-        cv::findContours(binary, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-        cv::drawContours(annotated, contours, -1, cv::Scalar(0, 255, 0), 1);
+        if (opt.showIds) {
+            cv::putText(annotated, std::to_string(g.id), g.centroid + cv::Point2f(7, -6),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.7, idTextColor, 2, cv::LINE_AA);
+        }
     }
     cv::imwrite(imgPath, annotated);
 
