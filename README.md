@@ -6,6 +6,8 @@ that counts grains in flatbed-scanner images and measures per-grain
 but built to run natively on Linux, macOS, and Windows (GrainScan itself
 only runs on Windows), with batch and multi-threaded processing built in.
 
+![example](example_annotated.png)
+
 ## How it works
 
 1. Grayscale + Otsu threshold, auto-detecting whether grains are darker or
