@@ -68,6 +68,8 @@ vcpkg_installed/
 Testing/
 .cache/
 dist/
+*.zip
+*.dmg
 
 # MacOS
 .DS_Store
