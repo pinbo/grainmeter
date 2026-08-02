@@ -33,6 +33,28 @@ cd "$PROJECT_ROOT"
 BIN="$BUILD_DIR/grainmeter"
 DIST_DIR="dist/grainmeter-macos"
 
+# Several Homebrew-built libraries (OpenBLAS, OpenEXR's Iex/IlmThread/Imath,
+# TBB) ship with more than one identical LC_RPATH load command already
+# baked in from their own build -- dylibbundler rewrites each one's *value*
+# but never deduplicates the *entries*, so the bundled copy ends up with
+# the same rpath string listed 2-4 times. Recent dyld refuses to load a
+# library at all when that happens ("Library not loaded ... duplicate
+# LC_RPATH"), even though dylibbundler's -p already bakes explicit
+# @executable_path/lib/... paths into every load command, so none of these
+# rpath entries are even needed for resolution. This collapses each file
+# down to at most one copy of each distinct rpath value.
+dedupe_rpaths() {
+    local f="$1" path count extra i
+    while read -r count path; do
+        if [[ "$count" -gt 1 ]]; then
+            extra=$((count - 1))
+            for ((i = 0; i < extra; i++)); do
+                install_name_tool -delete_rpath "$path" "$f" 2>/dev/null || true
+            done
+        fi
+    done < <(otool -l "$f" 2>/dev/null | awk '/cmd LC_RPATH/{getline; getline; sub(/^ *path /,""); sub(/ \(offset.*/,""); print}' | sort | uniq -c)
+}
+
 echo "==> Checking prerequisites"
 if [[ ! -x "$BIN" ]]; then
     echo "Error: $BIN not found or not executable. Build first:" >&2
@@ -70,8 +92,15 @@ dylibbundler -od -b \
     -p "@executable_path/lib/" \
     -s /opt/homebrew/lib -s /usr/local/lib
 
+echo "==> Removing duplicate LC_RPATH entries left by dylibbundler"
+dedupe_rpaths "$DIST_DIR/grainmeter"
+find "$DIST_DIR/lib" -type f | while IFS= read -r f; do
+    file "$f" 2>/dev/null | grep -q "Mach-O" && dedupe_rpaths "$f"; true
+done
+
 echo "==> Ad-hoc code-signing (required on Apple Silicon after modifying the binary)"
 codesign --force --sign - "$DIST_DIR/grainmeter"
+find "$DIST_DIR/lib" -type f -exec codesign --force --sign - {} \; 2>&1 | grep -v "replacing existing signature" || true
 
 echo "==> Verifying the binary is self-contained"
 echo "    (should list no /opt/homebrew or /usr/local paths below)"

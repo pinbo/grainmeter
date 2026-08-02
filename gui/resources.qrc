@@ -1,0 +1,5 @@
+<RCC>
+  <qresource prefix="/">
+    <file alias="grainmeter_icon.png">../assets/grainmeter_icon_512.png</file>
+  </qresource>
+</RCC>

@@ -42,17 +42,67 @@ message(STATUS "OpenCV libs (linked, restricted to used modules): ${GRAINMETER_O
 
 target_link_libraries(grainmeter PRIVATE ${GRAINMETER_OPENCV_LIBS} Threads::Threads)
 
+# --- Optional Qt GUI front-end ---
+# Builds grainmeter-gui alongside the CLI whenever Qt6 Widgets can be
+# found; entirely skipped (with a note, not an error) otherwise, so the
+# CLI always builds regardless of whether Qt is installed.
+option(GRAINMETER_BUILD_GUI "Build the Qt GUI front-end (grainmeter-gui)" ON)
+if(GRAINMETER_BUILD_GUI)
+  find_package(Qt6 QUIET COMPONENTS Widgets)
+  if(Qt6_FOUND)
+    message(STATUS "Qt6 found (${Qt6_VERSION}) -- building grainmeter-gui")
+    add_subdirectory(gui)
+  else()
+    message(STATUS "Qt6 Widgets not found -- skipping grainmeter-gui "
+                    "(install qt6-base-dev / brew install qt to enable it)")
+  endif()
+endif()
+
 if(APPLE)
   # `cmake --build build --target standalone` as a shortcut for
   # scripts/package_macos_standalone.sh, which bundles OpenCV's dylibs
   # next to the built binary (and rewrites its load commands to use them)
   # so the result runs on a Mac without OpenCV installed. See the
-  # README's "Distributing to a Mac without OpenCV installed" section.
+  # README's "Distributing on macOS without OpenCV/Qt installed" section.
+  # CLI-only -- use this if you don't need the GUI in what you're sharing.
   add_custom_target(standalone
     COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/package_macos_standalone.sh ${CMAKE_BINARY_DIR}
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     DEPENDS grainmeter
     COMMENT "Bundling OpenCV dependencies for standalone distribution"
+    VERBATIM
+  )
+
+  # `cmake --build build --target dist` packages the GUI *and* CLI
+  # together into a plain dist/ folder (scripts/package_macos_dist.sh) --
+  # use this to hand someone a single folder that gives them both, with
+  # no .dmg/hdiutil step involved. Only registered when the GUI actually
+  # got built, since it has nothing to bundle otherwise.
+  if(TARGET grainmeter-gui)
+    add_custom_target(dist
+      COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/package_macos_dist.sh ${CMAKE_BINARY_DIR}
+      WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+      DEPENDS grainmeter grainmeter-gui
+      COMMENT "Packaging GUI + CLI together into dist/"
+      VERBATIM
+    )
+  endif()
+endif()
+
+if(WIN32 AND TARGET grainmeter-gui)
+  # `cmake --build build --target dist` on Windows: the PowerShell
+  # equivalent of the macOS dist/ packaging above -- copies both .exe
+  # files and every DLL they need (OpenCV via vcpkg's applocal
+  # deployment, Qt via windeployqt) into one flat dist/ folder. See the
+  # README's "Distributing on Windows without OpenCV/Qt installed"
+  # section.
+  add_custom_target(dist
+    COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+            -File ${CMAKE_CURRENT_SOURCE_DIR}/scripts/package_windows_dist.ps1
+            -BuildDir ${CMAKE_BINARY_DIR} -Config $<CONFIG>
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    DEPENDS grainmeter grainmeter-gui
+    COMMENT "Packaging GUI + CLI together into dist/"
     VERBATIM
   )
 endif()

@@ -1,12 +1,10 @@
 # grainmeter
 
-A small, portable C++/OpenCV command-line tool that counts grains in
-flatbed-scanner images and measures per-grain **area, length, width, and
-mean color** — the same job GrainScan does, but built to run natively on
-Linux, macOS, and Windows (GrainScan itself only runs on Windows), with
-batch and multi-threaded processing built in.
-
-![example](example_annotated.png)
+A small, portable C++/OpenCV command-line tool (plus an optional Qt GUI)
+that counts grains in flatbed-scanner images and measures per-grain
+**area, length, width, and mean color** — the same job GrainScan does,
+but built to run natively on Linux, macOS, and Windows (GrainScan itself
+only runs on Windows), with batch and multi-threaded processing built in.
 
 ## How it works
 
@@ -38,10 +36,13 @@ batch and multi-threaded processing built in.
 ## Build
 
 Requires a C++17 compiler, CMake, and OpenCV (core/imgproc/imgcodecs).
+The Qt GUI additionally needs Qt6 Widgets, but is entirely optional — if
+Qt isn't found, CMake just skips it and builds the CLI on its own.
 
 **Linux (Debian/Ubuntu):**
 ```bash
 sudo apt install build-essential cmake libopencv-dev
+sudo apt install qt6-base-dev qt6-base-dev-tools   # optional, for the GUI
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
@@ -49,11 +50,14 @@ cmake --build build
 **macOS (Homebrew):**
 ```bash
 brew install cmake opencv
+brew install qt                                     # optional, for the GUI
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-Either of the above produces `build/grainmeter`. The build links only the
+Either of the above produces `build/grainmeter` (CLI) and, if Qt6 was
+found, `build/gui/grainmeter-gui` (GUI). Pass `-DGRAINMETER_BUILD_GUI=OFF`
+to skip the GUI even when Qt is installed. The CLI build links only the
 OpenCV modules actually used (core/imgproc/imgcodecs, + geometry on
 OpenCV 5) rather than every module your local OpenCV happens to have,
 which keeps process startup fast even with a "kitchen sink" OpenCV
@@ -104,54 +108,223 @@ A few Windows-specific things worth knowing:
   and add `-DVCPKG_TARGET_TRIPLET=x64-windows-static` to the `cmake -B
   build` command above — the build will be larger but has no DLL
   dependencies to carry around.
+- The GUI wasn't specifically tested on Windows during development (the
+  CLI portability work above was); `vcpkg install qt6-base` should let
+  `find_package(Qt6 ...)` pick it up the same way it does OpenCV, but if
+  something doesn't work, `-DGRAINMETER_BUILD_GUI=OFF` gets you the CLI
+  on its own while that gets sorted out.
 
-## Distributing to a Mac without OpenCV installed
+## GUI
+
+`build/gui/grainmeter-gui` is a thin Qt front-end: it builds a
+`grainmeter` command line from what you set in the UI, runs it as a
+subprocess, streams its log output live, then loads the resulting
+`summary.csv` into a table and shows each file's annotated QC image.
+
+- **Add Files... / Add Folder...** — pick individual scans, or grab every
+  `.jpg`/`.png`/`.tif` in a folder at once (single file or batch, same as
+  the CLI).
+- Options panel mirrors the CLI flags: DPI, output folder, area bounds,
+  polarity, watershed on/off with the three seed-tuning fields
+  (separation/merge/crease-closing), the min-solidity shape check
+  (spinbox, `0` = off, matching the CLI default), border exclusion,
+  `--color-seeds` and `--show-ids` checkboxes, thread count, and debug
+  dumps.
+- **Run** streams live progress into the log pane; **Cancel** kills the
+  subprocess.
+- Once finished, the **Summary** tab shows one row per file (seed count,
+  averages, and the `oversized_before_split` diagnostic — same columns
+  as `summary.csv`) — click a row to load that file's annotated image in
+  the **Preview** tab.
+- **Open Results Folder** jumps to the output directory in your file manager.
+
+The GUI looks for the `grainmeter` CLI binary next to itself, then on your
+`PATH`, and shows whichever it found in the **CLI executable** field at
+the top of the Options panel; if it can't find it (or you want to point
+at a different build), use the **Browse...** button next to that field
+(remembered for next time via `QSettings`).
+
+Results are written next to your input images by default (working
+directory = the folder of the first file you added), under the output
+folder named in the Options panel — same `<out-dir>/<name>.csv` /
+`<out-dir>/<name>_annotated.<ext>` / `<out-dir>/summary.csv` convention as
+the CLI, since the GUI is just building and running that same command.
+
+One thing worth knowing if you're on macOS and the file-picker buttons
+(Add Files.../Add Folder...) seem to do nothing when clicked: this
+usually means the `.app` bundle hasn't been through `macdeployqt`, which
+can break native Cocoa file-panel integration silently. The GUI already
+works around this by forcing Qt's own built-in dialogs
+(`QFileDialog::DontUseNativeDialog`) instead of the native ones, so this
+shouldn't come up — but if it does, running the built binary directly
+from Terminal instead of double-clicking the `.app` will surface any Qt
+warnings that a double-click launch hides.
+
+### App icon
+
+`assets/` holds the app icon: wheat-grain "petals" in a radial flower,
+with a red centroid dot at the center — a deliberate callback to the
+app's own annotated QC output (grain outline + red centroid dot on a dark
+scanner-board background).
+
+- `grainmeter_icon.svg` — vector source.
+- `grainmeter_icon_512.png` / `grainmeter_icon_1024.png` — flat PNGs for
+  general use (docs, packaging scripts, etc.).
+- `grainmeter.ico` — Windows icon (multi-resolution: 16 through 256px),
+  already wired up via `gui/grainmeter.rc` so `grainmeter-gui.exe` shows
+  it in Explorer/taskbar/Alt-Tab automatically on a Windows build.
+- `AppIcon.iconset/` — the macOS iconset (all sizes `iconutil` expects).
+  `.icns` is the one icon format that can only be built with Apple's own
+  tooling — there's no cross-platform way to produce it — so it isn't
+  generated automatically. One-time setup, on a Mac:
+  ```bash
+  iconutil -c icns assets/AppIcon.iconset -o assets/AppIcon.icns
+  ```
+  Once `assets/AppIcon.icns` exists, `cmake -B build` picks it up
+  automatically and bundles it into the `.app`; until then, the build
+  just uses Qt's default icon for the bundle/dock icon, so this step is
+  never required for the app to build and run.
+
+Separately from either of those, the icon is also embedded directly into
+the binary via a Qt resource file (`gui/resources.qrc`) and set as the
+window icon at startup (`QApplication::setWindowIcon`) — this part works
+immediately on every platform (title bar on Linux, taskbar before proper
+`.ico`/`.rc` embedding takes effect on Windows, Dock icon while running
+on macOS even before `.icns` is set up), with no per-platform steps
+needed at all.
+
+## Distributing without OpenCV/Qt installed on the other machine
 
 A build straight out of `cmake --build build` only runs on machines that
-already have your exact Homebrew OpenCV installed — the binary dynamically
-links against it from `/opt/homebrew` or `/usr/local`. To share it with
-someone who doesn't have that, OpenCV needs to travel with the binary one
-way or another. Two options:
+already have your exact OpenCV (and, for the GUI, Qt) installed — the
+binaries dynamically link against them. To share it with someone who
+doesn't have those, the dependencies need to travel with the binaries one
+way or another. Compile on the platform you're targeting (macOS build for
+macOS, Windows build for Windows — this isn't cross-compilation, each
+needs to be built on that platform), then run that platform's packaging
+step below.
 
-**Option A: bundle the dylibs (quick, uses your existing Homebrew build)**
+### macOS
+
+**Option A: GUI + CLI together (recommended if you want both)**
 ```bash
-brew install dylibbundler   # one-time
+brew install dylibbundler   # one-time; macdeployqt already comes with `brew install qt`
 
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-cmake --build build --target standalone     # macOS only; runs the script below
+cmake --build build --target dist     # runs scripts/package_macos_dist.sh
 ```
-This produces `dist/grainmeter-macos/` containing the executable plus a
-`lib/` folder of OpenCV's dylibs (and their own dependencies — libpng,
-libjpeg, zlib, ...), with the executable's load commands rewritten to use
-the bundled copies instead of your Homebrew paths. Copy the **whole
-folder** (not just the binary) to the other Mac and run `./grainmeter`
-from inside it. You can also run the packaging step directly:
+This produces a plain `dist/` folder — no `.dmg`, no `hdiutil`, nothing
+macOS-specific about how you transport it, just zip the folder and send
+it however you like:
+```
+dist/
+├── grainmeter        (standalone CLI, self-contained)
+├── lib/               (OpenCV + deps, for the standalone CLI above)
+└── Grainmeter.app/     (GUI, with its own internal CLI copy, independently self-contained)
+```
+`Grainmeter.app` and `grainmeter`+`lib/` are each independently
+relocatable — the GUI already looks for the CLI right next to itself
+(`Contents/MacOS/grainmeter`), so a copy is bundled inside the `.app`
+too; you can hand someone the whole `dist/` folder, or just
+`Grainmeter.app` by itself, or just `grainmeter`+`lib/` by itself, and
+each piece still works. (This does mean OpenCV's dylibs end up bundled
+twice — once in `dist/lib/`, once inside
+`Grainmeter.app/Contents/Frameworks/` — a few tens of MB traded for both
+pieces being genuinely independent rather than fragile cross-references
+into each other's internals.) You can also run the packaging step
+directly:
 ```bash
-./scripts/package_macos_standalone.sh build
+./scripts/package_macos_dist.sh build
 ```
-Two things worth knowing:
-- **Architecture**: the bundle only runs on the same CPU architecture it
-  was built on — arm64 (Apple Silicon) or x86_64 (Intel), not both. If you
-  need to support the other architecture too, build (and run this script)
-  on a Mac of that architecture, or investigate a universal (`lipo`-merged)
-  build of both the binary and OpenCV — not something this script does
-  for you.
-- I wrote and syntax-checked this script but couldn't run it end-to-end
-  myself — bundling needs real macOS tooling (`dylibbundler`, `otool`,
-  `codesign`) not available in the Linux sandbox I build in. It uses
-  `set -euo pipefail`, so if a step fails it stops right there with the
-  real error rather than silently producing a broken bundle.
 
-**Option B: static linking (a single self-contained file, more setup)**
-If you'd rather ship one file with no accompanying folder, OpenCV needs to
-be built as static libraries first — Homebrew's `opencv` formula only
-ships shared libraries, so this means building OpenCV from source with
-`-DBUILD_SHARED_LIBS=OFF` (via `cmake` directly, or a package manager
-that supports static builds, e.g. vcpkg with a `-static` triplet), then
-pointing this project's build at that static install instead of Homebrew's.
-That's a larger undertaking than this README covers in detail — Option A
-above is the more practical path for most cases.
+In a new computer, you can unzip the folder, enter the folder, and open a terminal in the folder, then run:
+```bash
+xattr -cr grainmeter Grainmeter.app lib/*
+```
+This will remove all the warnings. Otherwise, you will have to manually agree to run each single file in the directory.
+
+**Option B: create a dmg file**
+
+```bash
+./scripts/package_macos_app.sh build # this will create a dmg file grainmeter-x.x.x-macos.dmg, x.x.x is the version number
+```
+
+**Option B: CLI only, in its own differently-shaped folder**
+```bash
+cmake --build build --target standalone     # runs scripts/package_macos_standalone.sh
+```
+Produces `dist/grainmeter-macos/grainmeter` + `dist/grainmeter-macos/lib/`
+— useful if you specifically don't want the GUI/Qt involved at all, but
+otherwise Option A already gives you a standalone CLI (`dist/grainmeter`)
+alongside the GUI, so most of the time Option A alone covers this too.
+
+Two things worth knowing, applying to both:
+- **Architecture**: the result only runs on the same CPU architecture it
+  was built on — arm64 (Apple Silicon) or x86_64 (Intel), not both. If you
+  need to support the other architecture too, build (and run the script)
+  on a Mac of that architecture, or investigate a universal (`lipo`-merged)
+  build of the binaries and their dependencies — not something either
+  script does for you.
+- I wrote and syntax-checked both scripts but couldn't run them
+  end-to-end myself — bundling needs real macOS tooling (`macdeployqt`,
+  `dylibbundler`, `otool`, `codesign`) not available in the Linux sandbox
+  I build in. Both use `set -euo pipefail`, so if a step fails it stops
+  right there with the real error rather than silently producing a
+  broken result.
+
+**Option C: static linking (a single self-contained CLI file, more setup)**
+If you'd rather ship one CLI file with no accompanying folder, OpenCV
+needs to be built as static libraries first — Homebrew's `opencv` formula
+only ships shared libraries, so this means building OpenCV from source
+with `-DBUILD_SHARED_LIBS=OFF` (via `cmake` directly, or a package
+manager that supports static builds, e.g. vcpkg with a `-static`
+triplet), then pointing this project's build at that static install
+instead of Homebrew's. That's a larger undertaking than this README
+covers in detail — Option A above is the more practical path for most
+cases.
+
+### Windows
+
+Windows is simpler here than macOS: there's no dylib rpath rewriting to
+do, since Windows just searches the `.exe`'s own folder for DLLs
+automatically. "Self-contained" just means the right DLLs are sitting
+next to the `.exe`.
+
+```powershell
+cmake -B build -DCMAKE_TOOLCHAIN_FILE=C:\path\to\vcpkg\scripts\buildsystems\vcpkg.cmake
+cmake --build build --config Release
+cmake --build build --target dist     # runs scripts/package_windows_dist.ps1
+```
+This produces:
+```
+dist\
+├── grainmeter.exe
+├── grainmeter-gui.exe    (looks for grainmeter.exe right next to it)
+└── *.dll                 (OpenCV, from vcpkg's automatic deployment; Qt, from windeployqt)
+```
+vcpkg already copies OpenCV's DLLs next to each `.exe` at build time
+(`VCPKG_APPLOCAL_DEPS`, on by default), so the script's main job is
+running `windeployqt` (Qt's official deployment tool — the Windows
+equivalent of macOS's `macdeployqt`) to pull in Qt's DLLs and plugins for
+the GUI, then consolidating both executables and every DLL into this one
+flat folder. Zip the whole `dist\` folder to distribute both together.
+You can also run the packaging step directly:
+```powershell
+.\scripts\package_windows_dist.ps1 -BuildDir build -Config Release
+```
+If it can't find `windeployqt.exe` automatically (it searches `PATH` and
+common vcpkg/Qt install locations), pass it explicitly:
+```powershell
+.\scripts\package_windows_dist.ps1 -WindeployqtPath "C:\path\to\windeployqt.exe"
+```
+
+Same honesty note as the macOS scripts: I wrote this one carefully but
+couldn't run it at all myself — this Windows-packaging step needs
+`windeployqt` and PowerShell conventions I have no way to exercise from
+the Linux sandbox I build in (unlike the macOS scripts, where I could at
+least syntax-check with `bash -n`). If something doesn't work, the error
+message should point at which step failed; let me know what you hit.
 
 ## Usage
 
@@ -510,6 +683,18 @@ repeated color). All of the counting/measurement regression tests above
 were re-run after these changes and produced identical grain counts to
 before, confirming they're purely visual with no effect on detection.
 
+The GUI (removed and later re-added during development) was checked with
+an automated driver rather than by hand: it programmatically added a real
+image to the file list, clicked Run the same way a user would, waited for
+the actual `grainmeter` subprocess to finish, and confirmed the resulting
+summary table populated with the correct 9 columns and the exact same
+grain count (217) and `oversized_before_split` value (38) as the
+equivalent direct CLI run on the same image — confirming the GUI's
+argument-building for every option added since it was first built
+(including the newer `--min-solidity`, `--color-seeds`, and `--show-ids`
+flags) round-trips correctly through the real CLI rather than just
+looking right in the UI.
+
 ## Known limitations vs. GrainScan
 
 - Heavily overlapping grains (>~40% overlap) can still be under-split, or
@@ -522,7 +707,6 @@ before, confirming they're purely visual with no effect on detection.
   or known-size disc in the scan) — DPI is taken as ground truth from the
   scanner setting, which is accurate as long as your scanner driver isn't
   lying about its resolution.
-
 
 ## Acknowledgement
 This app used [OpenCV](https://opencv.org/) library and was written with the help of [Claude AI](https://claude.ai/).
