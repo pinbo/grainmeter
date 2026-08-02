@@ -179,6 +179,9 @@ if [[ ! -f "$DIST_DIR/platforms/qwindows.dll" ]]; then
     sweep_transitive_deps
 fi
 
+# I need to run this one more time to get all the dlls.
+windeployqt dist/grainmeter-gui.exe
+
 echo ""
 echo "Done: $PROJECT_ROOT/$DIST_DIR/"
 echo "  grainmeter.exe       -- CLI"
