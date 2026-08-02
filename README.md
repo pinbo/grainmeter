@@ -67,6 +67,8 @@ install.
 
 **Windows 11 (vcpkg):**
 
+This part is written by `Claude`. I did not run it. Check the [method I used on Windows 11](compile_in_windows11.md).
+
 The easiest way to get OpenCV on Windows is via
 [vcpkg](https://github.com/microsoft/vcpkg), Microsoft's C++ package
 manager. You'll need Visual Studio 2022 (the "Desktop development with
