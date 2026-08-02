@@ -173,7 +173,14 @@ echo "==> Running macdeployqt on Grainmeter.app (bundles Qt)"
 # bundling them entirely, while still rewriting grainmeter-gui's own load
 # commands to @executable_path/../Frameworks/... -- producing an app that
 # "succeeds" here but fails to launch (dyld: Library not loaded).
-"$MACDEPLOYQT" "$DIST_DIR/Grainmeter.app" -verbose=1 -libpath=/opt/homebrew/lib -libpath=/usr/local/lib
+#
+# -no-codesign: newer macdeployqt (Qt 6.5+) ad-hoc signs everything it
+# touches by default, which can log a scary-looking (but non-fatal)
+# "Codesign signing error" for a dylib install_name_tool touched earlier.
+# Harmless either way since this script re-signs the whole bundle itself
+# below -- skipping macdeployqt's own redundant pass just avoids the
+# misleading error output.
+"$MACDEPLOYQT" "$DIST_DIR/Grainmeter.app" -verbose=1 -no-codesign -libpath=/opt/homebrew/lib -libpath=/usr/local/lib
 
 echo "==> Removing duplicate LC_RPATH entries left by dylibbundler"
 dedupe_rpaths_in_dir "$DIST_DIR/Grainmeter.app/Contents"

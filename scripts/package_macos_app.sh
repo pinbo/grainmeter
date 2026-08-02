@@ -186,8 +186,21 @@ echo "==> Running macdeployqt (bundles Qt frameworks + plugins for the GUI)"
 # sibling formulas -- so without this, macdeployqt fails to resolve even
 # QtCore/QtGui/QtWidgets themselves ("Cannot resolve rpath ...") and skips
 # bundling them entirely, well before it gets to the PDF/SVG/virtual-
-# keyboard plugins this app doesn't use anyway (removed just below).
-"$MACDEPLOYQT" "$APP_BUNDLE" -verbose=1 -libpath=/opt/homebrew/lib -libpath=/usr/local/lib
+# keyboard plugins this app doesn't use anyway (removed just below). Those
+# "Cannot resolve rpath" errors for QtPdf/QtSvg/QtVirtualKeyboard* are
+# expected and harmless -- they're for plugins this app never uses, and
+# get deleted right after regardless of whether macdeployqt could resolve
+# them.
+#
+# -no-codesign: newer macdeployqt (Qt 6.5+) ad-hoc signs everything it
+# touches by default, and can log a scary-looking (but non-fatal) "Codesign
+# signing error" if it trips over a dylib install_name_tool touched earlier
+# (invalidating that dylib's original signature) -- e.g. libbrotlicommon,
+# pulled in via Qt's own freetype/harfbuzz dependency. Harmless either way,
+# since the script re-signs the entire bundle itself at the end (see
+# "Ad-hoc code-signing the bundle" below) -- but skipping macdeployqt's own
+# redundant signing pass avoids the misleading error output entirely.
+"$MACDEPLOYQT" "$APP_BUNDLE" -verbose=1 -no-codesign -libpath=/opt/homebrew/lib -libpath=/usr/local/lib
 
 echo "==> Removing Qt plugins this app doesn't use"
 # grainmeter-gui only displays JPEG/PNG/TIFF images through Qt Widgets --
