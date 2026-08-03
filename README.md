@@ -1,4 +1,4 @@
-# grainmeter
+# GrainMeter <img src="assets/grainmeter_icon.svg" width="50" height="50" alt="icon">
 
 A small, portable C++/OpenCV command-line tool (plus an optional Qt GUI)
 that counts grains in flatbed-scanner images and measures per-grain
