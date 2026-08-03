@@ -101,6 +101,7 @@ struct Grain {
     cv::Point2f centroid;
     bool touchesBorder;
     double meanR, meanG, meanB; // 0-255, sampled from the original image
+    double meanH, meanS, meanV; // H 0-360 degrees, S/V 0-100%, sampled from the original image
     double solidity;            // areaPx / convex-hull area; 1.0 = perfectly convex (oval-like), lower = concave (e.g. a "peanut" shape from two touching grains)
     cv::Rect regionBboxGlobal;  // this grain's own mask, for accurate per-grain outline drawing --
     cv::Mat regionMaskLocal;    // NOT the same as re-finding contours on the raw threshold mask, which
@@ -489,6 +490,19 @@ static cv::Vec3d meanColorRGB(const cv::Mat& bgrRoi, const cv::Mat& mask8u) {
     return cv::Vec3d(m[2], m[1], m[0]);
 }
 
+// Mean H,S,V of `bgr` under a binary mask, both restricted to the same
+// small ROI. H is scaled to the conventional 0-360 degrees (OpenCV's 8-bit
+// HSV stores it halved, 0-179, to fit a byte); S and V are scaled to 0-100.
+// This averages hue linearly rather than circularly, so it under-reports
+// for grains whose hue straddles the 0/360 wrap (i.e. red); acceptable
+// here since grains are practically never that saturated a red.
+static cv::Vec3d meanColorHSV(const cv::Mat& bgrRoi, const cv::Mat& mask8u) {
+    cv::Mat hsvRoi;
+    cv::cvtColor(bgrRoi, hsvRoi, cv::COLOR_BGR2HSV);
+    cv::Scalar m = cv::mean(hsvRoi, mask8u);
+    return cv::Vec3d(m[0] * 2.0, m[1] / 255.0 * 100.0, m[2] / 255.0 * 100.0);
+}
+
 // A visually distinct BGR color for grain index `i`, for --color-seeds.
 // Steps hue by the golden angle (~137.5 degrees) so consecutive indices
 // land far apart around the color wheel; unlike splitting the wheel into
@@ -595,6 +609,7 @@ static bool measureGrainRegion(const cv::Mat& bgrFull, const GrainRegion& region
     }
 
     cv::Vec3d rgb = meanColorRGB(bgrFull(region.bboxGlobal), region.maskLocal);
+    cv::Vec3d hsv = meanColorHSV(bgrFull(region.bboxGlobal), region.maskLocal);
 
     // Solidity: how much of this region's convex hull is actually filled.
     // A single grain, being roughly oval, is close to convex (solidity near
@@ -614,6 +629,7 @@ static bool measureGrainRegion(const cv::Mat& bgrFull, const GrainRegion& region
     out.centroid = centroid;
     out.touchesBorder = border;
     out.meanR = rgb[0]; out.meanG = rgb[1]; out.meanB = rgb[2];
+    out.meanH = hsv[0]; out.meanS = hsv[1]; out.meanV = hsv[2];
     out.solidity = solidity;
     out.regionBboxGlobal = region.bboxGlobal;
     out.regionMaskLocal = region.maskLocal.clone();
@@ -714,7 +730,10 @@ struct ImageResult {
     double meanLengthMm = 0.0;
     double meanWidthMm = 0.0;
     double meanPerimeterMm = 0.0;
+    double meanCircularity = 0.0;
+    double meanAspectRatio = 0.0;
     double meanR = 0.0, meanG = 0.0, meanB = 0.0;
+    double meanH = 0.0, meanS = 0.0, meanV = 0.0;
     int oversizedBeforeSplit = 0;
 };
 
@@ -790,6 +809,7 @@ static ImageResult processImage(const std::string& inputPath, const Options& opt
             for (auto& p : c) shifted[0].push_back(p - bbox.tl());
             cv::drawContours(localMask, shifted, 0, cv::Scalar(255), cv::FILLED);
             cv::Vec3d rgb = meanColorRGB(bgr(bbox), localMask);
+            cv::Vec3d hsv = meanColorHSV(bgr(bbox), localMask);
             std::vector<cv::Point> hull;
             cv::convexHull(c, hull);
             double hullArea = cv::contourArea(hull);
@@ -803,6 +823,7 @@ static ImageResult processImage(const std::string& inputPath, const Options& opt
             g.centroid = centroid;
             g.touchesBorder = border;
             g.meanR = rgb[0]; g.meanG = rgb[1]; g.meanB = rgb[2];
+            g.meanH = hsv[0]; g.meanS = hsv[1]; g.meanV = hsv[2];
             g.solidity = solidity;
             g.regionBboxGlobal = bbox;
             g.regionMaskLocal = localMask.clone();
@@ -840,10 +861,12 @@ static ImageResult processImage(const std::string& inputPath, const Options& opt
     if (!imgParent.empty()) fs::create_directories(imgParent, ec);
 
     std::ofstream csv(csvPath);
-    csv << "id,area_mm2,length_mm,width_mm,perimeter_mm,mean_r,mean_g,mean_b\n";
+    csv << "id,area_mm2,length_mm,width_mm,perimeter_mm,circularity,aspect_ratio,"
+           "mean_r,mean_g,mean_b,mean_h,mean_s,mean_v\n";
     csv << std::fixed << std::setprecision(4);
 
-    std::vector<double> areas, lengths, widths, perimeters, colorsR, colorsG, colorsB;
+    std::vector<double> areas, lengths, widths, perimeters, circularities, aspectRatios,
+        colorsR, colorsG, colorsB, colorsH, colorsS, colorsV;
     int id = 1;
     for (auto& g : kept) {
         g.id = id;
@@ -851,18 +874,31 @@ static ImageResult processImage(const std::string& inputPath, const Options& opt
         double lengthMm = g.lengthPx / pxPerMm;
         double widthMm = g.widthPx / pxPerMm;
         double perimeterMm = g.perimeterPx / pxPerMm;
+        // Circularity: 1.0 for a perfect circle, lower for elongated/irregular
+        // shapes. Dimensionless -- computing from the mm-converted area and
+        // perimeter here gives the same result as from raw pixels, since the
+        // pxPerMm scale factor cancels out of the ratio.
+        double circularity = (perimeterMm > 0) ? (4.0 * CV_PI * areaMm2) / (perimeterMm * perimeterMm) : 0.0;
+        double aspectRatio = (widthMm > 0) ? (lengthMm / widthMm) : 0.0;
 
         csv << id << "," << areaMm2 << "," << lengthMm << "," << widthMm << "," << perimeterMm << ","
-            << std::setprecision(1) << g.meanR << "," << g.meanG << "," << g.meanB
+            << circularity << "," << aspectRatio << ","
+            << std::setprecision(1) << g.meanR << "," << g.meanG << "," << g.meanB << ","
+            << g.meanH << "," << g.meanS << "," << g.meanV
             << std::setprecision(4) << "\n";
 
         areas.push_back(areaMm2);
         lengths.push_back(lengthMm);
         widths.push_back(widthMm);
         perimeters.push_back(perimeterMm);
+        circularities.push_back(circularity);
+        aspectRatios.push_back(aspectRatio);
         colorsR.push_back(g.meanR);
         colorsG.push_back(g.meanG);
         colorsB.push_back(g.meanB);
+        colorsH.push_back(g.meanH);
+        colorsS.push_back(g.meanS);
+        colorsV.push_back(g.meanV);
         ++id;
     }
     csv.close();
@@ -932,6 +968,8 @@ static ImageResult processImage(const std::string& inputPath, const Options& opt
 
     double areaMean = meanOf(areas), lenMean = meanOf(lengths), widMean = meanOf(widths);
     double periMean = meanOf(perimeters);
+    double circMean = meanOf(circularities), aspectMean = meanOf(aspectRatios);
+    double hMean = meanOf(colorsH), sMean = meanOf(colorsS), vMean = meanOf(colorsV);
 
     std::ostringstream out;
     out << std::fixed << std::setprecision(3);
@@ -960,6 +998,11 @@ static ImageResult processImage(const std::string& inputPath, const Options& opt
     row("Length (mm)   ", lengths, lenMean);
     row("Width (mm)    ", widths, widMean);
     row("Perimeter (mm) ", perimeters, periMean);
+    row("Circularity   ", circularities, circMean);
+    row("Aspect ratio  ", aspectRatios, aspectMean);
+    row("Hue (deg)     ", colorsH, hMean);
+    row("Saturation (%)", colorsS, sMean);
+    row("Value (%)     ", colorsV, vMean);
 
     out << "\nPer-grain CSV written to: " << csvPath << "\n";
     out << "Annotated QC image written to: " << imgPath << "\n";
@@ -971,9 +1014,14 @@ static ImageResult processImage(const std::string& inputPath, const Options& opt
     result.meanLengthMm = lenMean;
     result.meanWidthMm = widMean;
     result.meanPerimeterMm = periMean;
+    result.meanCircularity = circMean;
+    result.meanAspectRatio = aspectMean;
     result.meanR = meanOf(colorsR);
     result.meanG = meanOf(colorsG);
     result.meanB = meanOf(colorsB);
+    result.meanH = hMean;
+    result.meanS = sMean;
+    result.meanV = vMean;
     result.oversizedBeforeSplit = oversizedBeforeSplitCount;
     return result;
 }
@@ -1044,7 +1092,8 @@ int main(int argc, char** argv) {
 
         std::ofstream summary(summaryPath);
         summary << "filename,seed_count,mean_area_mm2,mean_length_mm,mean_width_mm,mean_perimeter_mm,"
-                   "mean_r,mean_g,mean_b,oversized_before_split\n";
+                   "mean_circularity,mean_aspect_ratio,mean_r,mean_g,mean_b,mean_h,mean_s,mean_v,"
+                   "oversized_before_split\n";
         summary << std::fixed;
         for (size_t i = 0; i < files.size(); ++i) {
             const ImageResult& r = results[i];
@@ -1056,13 +1105,15 @@ int main(int argc, char** argv) {
 
             summary << "\"" << escaped << "\",";
             if (!r.ok) {
-                summary << "0,,,,,,,,\n"; // failed file: seed count 0, blank averages
+                summary << "0,,,,,,,,,,,,,\n"; // failed file: seed count 0, blank averages
                 continue;
             }
             summary << r.grainCount << ","
                     << std::setprecision(4) << r.meanAreaMm2 << ","
                     << r.meanLengthMm << "," << r.meanWidthMm << "," << r.meanPerimeterMm << ","
+                    << r.meanCircularity << "," << r.meanAspectRatio << ","
                     << std::setprecision(1) << r.meanR << "," << r.meanG << "," << r.meanB << ","
+                    << r.meanH << "," << r.meanS << "," << r.meanV << ","
                     << r.oversizedBeforeSplit
                     << "\n";
         }
