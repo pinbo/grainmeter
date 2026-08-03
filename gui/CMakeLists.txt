@@ -13,9 +13,10 @@ set(GRAINMETER_GUI_SOURCES
 # Explorer/taskbar/Alt-Tab, via the resource script referencing it.
 if(WIN32)
     list(APPEND GRAINMETER_GUI_SOURCES grainmeter.rc)
+	add_executable(grainmeter-gui WIN32 ${GRAINMETER_GUI_SOURCES})
+else()
+	add_executable(grainmeter-gui ${GRAINMETER_GUI_SOURCES})
 endif()
-
-add_executable(grainmeter-gui ${GRAINMETER_GUI_SOURCES})
 
 target_link_libraries(grainmeter-gui PRIVATE Qt6::Widgets)
 
