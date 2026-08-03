@@ -28,7 +28,7 @@
 #   *.dll                -- OpenCV + Qt + their dependencies
 #   platforms/, etc.     -- Qt plugins, from windeployqt
 
-set -euo pipefail
+#set -euo pipefail
 
 case "$(uname -s)" in
     MINGW*|MSYS*) ;;
@@ -40,6 +40,10 @@ esac
 
 BUILD_DIR="${1:-build}"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+echo "BUILD_DIR is $BUILD_DIR"
+echo "PROJECT_ROOT is $PROJECT_ROOT"
+
 cd "$PROJECT_ROOT"
 
 DIST_DIR="dist"
@@ -180,7 +184,7 @@ if [[ ! -f "$DIST_DIR/platforms/qwindows.dll" ]]; then
 fi
 
 # I need to run this one more time to get all the dlls.
-windeployqt dist/grainmeter-gui.exe
+# windeployqt dist/grainmeter-gui.exe
 
 echo ""
 echo "Done: $PROJECT_ROOT/$DIST_DIR/"
