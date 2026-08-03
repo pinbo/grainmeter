@@ -97,6 +97,7 @@ struct Grain {
     double areaPx;
     double lengthPx;
     double widthPx;
+    double perimeterPx;
     cv::Point2f centroid;
     bool touchesBorder;
     double meanR, meanG, meanB; // 0-255, sampled from the original image
@@ -115,7 +116,7 @@ static void say(std::ostream& os, const std::string& s) {
     os << s;
 }
 
-static const char* GRAINMETER_VERSION = "1.2.0";
+static const char* GRAINMETER_VERSION = "1.3.0";
 
 static void printUsage(const char* prog) {
     std::cout <<
@@ -609,6 +610,7 @@ static bool measureGrainRegion(const cv::Mat& bgrFull, const GrainRegion& region
     out.areaPx = area;
     out.lengthPx = std::max(rect.size.width, rect.size.height);
     out.widthPx = std::min(rect.size.width, rect.size.height);
+    out.perimeterPx = cv::arcLength(*biggest, true);
     out.centroid = centroid;
     out.touchesBorder = border;
     out.meanR = rgb[0]; out.meanG = rgb[1]; out.meanB = rgb[2];
@@ -711,6 +713,7 @@ struct ImageResult {
     double meanAreaMm2 = 0.0;
     double meanLengthMm = 0.0;
     double meanWidthMm = 0.0;
+    double meanPerimeterMm = 0.0;
     double meanR = 0.0, meanG = 0.0, meanB = 0.0;
     int oversizedBeforeSplit = 0;
 };
@@ -796,6 +799,7 @@ static ImageResult processImage(const std::string& inputPath, const Options& opt
             g.areaPx = area;
             g.lengthPx = std::max(rect.size.width, rect.size.height);
             g.widthPx = std::min(rect.size.width, rect.size.height);
+            g.perimeterPx = cv::arcLength(c, true);
             g.centroid = centroid;
             g.touchesBorder = border;
             g.meanR = rgb[0]; g.meanG = rgb[1]; g.meanB = rgb[2];
@@ -836,24 +840,26 @@ static ImageResult processImage(const std::string& inputPath, const Options& opt
     if (!imgParent.empty()) fs::create_directories(imgParent, ec);
 
     std::ofstream csv(csvPath);
-    csv << "id,area_mm2,length_mm,width_mm,mean_r,mean_g,mean_b\n";
+    csv << "id,area_mm2,length_mm,width_mm,perimeter_mm,mean_r,mean_g,mean_b\n";
     csv << std::fixed << std::setprecision(4);
 
-    std::vector<double> areas, lengths, widths, colorsR, colorsG, colorsB;
+    std::vector<double> areas, lengths, widths, perimeters, colorsR, colorsG, colorsB;
     int id = 1;
     for (auto& g : kept) {
         g.id = id;
         double areaMm2 = g.areaPx * mm2PerPx2;
         double lengthMm = g.lengthPx / pxPerMm;
         double widthMm = g.widthPx / pxPerMm;
+        double perimeterMm = g.perimeterPx / pxPerMm;
 
-        csv << id << "," << areaMm2 << "," << lengthMm << "," << widthMm << ","
+        csv << id << "," << areaMm2 << "," << lengthMm << "," << widthMm << "," << perimeterMm << ","
             << std::setprecision(1) << g.meanR << "," << g.meanG << "," << g.meanB
             << std::setprecision(4) << "\n";
 
         areas.push_back(areaMm2);
         lengths.push_back(lengthMm);
         widths.push_back(widthMm);
+        perimeters.push_back(perimeterMm);
         colorsR.push_back(g.meanR);
         colorsG.push_back(g.meanG);
         colorsB.push_back(g.meanB);
@@ -925,6 +931,7 @@ static ImageResult processImage(const std::string& inputPath, const Options& opt
     };
 
     double areaMean = meanOf(areas), lenMean = meanOf(lengths), widMean = meanOf(widths);
+    double periMean = meanOf(perimeters);
 
     std::ostringstream out;
     out << std::fixed << std::setprecision(3);
@@ -952,6 +959,7 @@ static ImageResult processImage(const std::string& inputPath, const Options& opt
     row("Area (mm2)    ", areas, areaMean);
     row("Length (mm)   ", lengths, lenMean);
     row("Width (mm)    ", widths, widMean);
+    row("Perimeter (mm) ", perimeters, periMean);
 
     out << "\nPer-grain CSV written to: " << csvPath << "\n";
     out << "Annotated QC image written to: " << imgPath << "\n";
@@ -962,6 +970,7 @@ static ImageResult processImage(const std::string& inputPath, const Options& opt
     result.meanAreaMm2 = areaMean;
     result.meanLengthMm = lenMean;
     result.meanWidthMm = widMean;
+    result.meanPerimeterMm = periMean;
     result.meanR = meanOf(colorsR);
     result.meanG = meanOf(colorsG);
     result.meanB = meanOf(colorsB);
@@ -1034,7 +1043,7 @@ int main(int argc, char** argv) {
         if (!summaryParent.empty()) fs::create_directories(summaryParent, sec);
 
         std::ofstream summary(summaryPath);
-        summary << "filename,seed_count,mean_area_mm2,mean_length_mm,mean_width_mm,"
+        summary << "filename,seed_count,mean_area_mm2,mean_length_mm,mean_width_mm,mean_perimeter_mm,"
                    "mean_r,mean_g,mean_b,oversized_before_split\n";
         summary << std::fixed;
         for (size_t i = 0; i < files.size(); ++i) {
@@ -1047,12 +1056,12 @@ int main(int argc, char** argv) {
 
             summary << "\"" << escaped << "\",";
             if (!r.ok) {
-                summary << "0,,,,,,,\n"; // failed file: seed count 0, blank averages
+                summary << "0,,,,,,,,\n"; // failed file: seed count 0, blank averages
                 continue;
             }
             summary << r.grainCount << ","
                     << std::setprecision(4) << r.meanAreaMm2 << ","
-                    << r.meanLengthMm << "," << r.meanWidthMm << ","
+                    << r.meanLengthMm << "," << r.meanWidthMm << "," << r.meanPerimeterMm << ","
                     << std::setprecision(1) << r.meanR << "," << r.meanG << "," << r.meanB << ","
                     << r.oversizedBeforeSplit
                     << "\n";

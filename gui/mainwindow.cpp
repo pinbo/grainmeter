@@ -266,10 +266,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     m_summaryTable = new QTableWidget(this);
     m_summaryTable->setObjectName("summaryTable");
-    m_summaryTable->setColumnCount(9);
+    m_summaryTable->setColumnCount(10);
     m_summaryTable->setHorizontalHeaderLabels(
         {"File", "Seeds", "Mean Area (mm\u00B2)", "Mean Length (mm)", "Mean Width (mm)",
-         "Mean R", "Mean G", "Mean B", "Oversized Before Split"});
+         "Mean Perimeter (mm)", "Mean R", "Mean G", "Mean B", "Oversized Before Split"});
     m_summaryTable->horizontalHeader()->setStretchLastSection(false);
     m_summaryTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     m_summaryTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -551,11 +551,11 @@ void MainWindow::loadSummaryTable(const QString& summaryCsvPath) {
         if (line.trimmed().isEmpty()) continue;
 
         QStringList fields = splitSummaryLine(line);
-        if (fields.size() < 8) continue;
+        if (fields.size() < 9) continue;
 
         m_summaryTable->insertRow(row);
         QString filePath = fields[0];
-        int numCols = std::min(static_cast<int>(fields.size()), 9);
+        int numCols = std::min(static_cast<int>(fields.size()), 10);
         for (int col = 0; col < numCols; ++col) {
             auto* item = new QTableWidgetItem(fields[col]);
             m_summaryTable->setItem(row, col, item);

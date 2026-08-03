@@ -158,18 +158,20 @@ either mode (single-file or batch).
 
 ### CSV columns
 
-**Per-grain CSV** (`<name>.csv`): `id, area_mm2, length_mm, width_mm, mean_r, mean_g, mean_b`
+**Per-grain CSV** (`<name>.csv`): `id, area_mm2, length_mm, width_mm, perimeter_mm, mean_r, mean_g, mean_b`
 
 - `length`/`width` are the long/short axis of the rotated bounding box fit
   to each grain outline (the standard measure used by grain-phenotyping
   tools such as GrainScan/SmartGrain).
+- `perimeter_mm` is the arc length of that grain's own contour (its actual
+  outline, not the bounding box), converted from pixels using the scan DPI.
 - `mean_r`/`mean_g`/`mean_b` are the mean red/green/blue channel values
   (0-255) of the pixels inside that grain's mask, sampled from the
   original (unblurred, unthresholded) image — useful as a proxy for grain
   color/brightness traits.
 
 **Summary CSV** (`summary.csv`, one row per input file):
-`filename, seed_count, mean_area_mm2, mean_length_mm, mean_width_mm, mean_r, mean_g, mean_b, oversized_before_split`
+`filename, seed_count, mean_area_mm2, mean_length_mm, mean_width_mm, mean_perimeter_mm, mean_r, mean_g, mean_b, oversized_before_split`
 
 - `seed_count` is the number of grains counted (post-filtering) in that file.
 - The `mean_*` columns are that file's per-grain averages from its own CSV.
