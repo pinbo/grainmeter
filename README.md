@@ -19,15 +19,18 @@ only runs on Windows), with batch and multi-threaded processing built in.
    segmentation step handles).
 4. For each resulting region: pixel area, a rotated bounding box
    (`cv::minAreaRect`) for length (long side) / width (short side)
-   converted to mm using the scan's DPI (`px_per_mm = dpi / 25.4`), and
-   mean R/G/B sampled from the original image under that grain's mask.
-5. A region smaller than `--min-area-mm2` (dust/debris) is dropped. A
-   region bigger than `--max-area-mm2`, **or** (if `--min-solidity` is
-   turned on -- it's off by default) less convex/oval-shaped than that
-   threshold (its contour area relative to its convex-hull area -- two
-   touching grains form a pinched, concave "peanut" shape even when their
-   combined area looks like a normal single grain), is assumed to be an
-   unsplit touching-grain cluster: it gets a forced re-split attempt
+   converted to mm using the scan's DPI (`px_per_mm = dpi / 25.4`, or
+   derived from a reference coin instead -- see `--coin-diameter-mm`
+   below), and mean R/G/B sampled from the original image under that
+   grain's mask.
+5. A region smaller than `--min-area-mm2`, narrower than `--min-width-mm`,
+   or shorter than `--min-length-mm` (dust/debris) is dropped. A region
+   bigger than `--max-area-mm2`, **or** (if `--min-solidity` is turned on
+   -- it's off by default) less convex/oval-shaped than that threshold
+   (its contour area relative to its convex-hull area -- two touching
+   grains form a pinched, concave "peanut" shape even when their combined
+   area looks like a normal single grain), is assumed to be an unsplit
+   touching-grain cluster: it gets a forced re-split attempt
    (progressively tighter watershed seed spacing on just that region)
    rather than being discarded; if no split is found at any spacing, it's
    kept as a single region rather than dropped. A region touching the
@@ -90,6 +93,12 @@ Full options:
 --min-area-mm2 <n>             Reject regions smaller than this             (3.0)
 --max-area-mm2 <n>              Regions bigger than this get re-split,
                                  not discarded (see "How it works")          (20.0)
+--min-width-mm <n>              Reject regions narrower (short side of the
+                                 rotated bounding box) than this             (1.0)
+--min-length-mm <n>             Reject regions shorter (long side of the
+                                 rotated bounding box) than this             (2.0)
+--coin-diameter-mm <n>          Diameter of a reference coin placed next to
+                                 the grains; overrides --dpi (see below)     (0, off)
 --polarity <auto|dark|light>   Grain vs. background brightness              (auto)
 --no-watershed                 Disable splitting of touching grains
 --include-border                Keep grains touching the image edge
@@ -113,6 +122,28 @@ Full options:
 --help                          Show usage
 --version                       Show version number and exit
 ```
+
+### Using a reference coin instead of DPI (`--coin-diameter-mm`)
+
+If you don't know (or don't trust) the scanner's DPI, place a coin — or any
+other circular object of known size — on the scanner bed alongside the
+grains, then pass its real-world diameter:
+```bash
+./build/grainmeter --input scan.jpg --coin-diameter-mm 24.26
+```
+The tool finds the biggest sufficiently circular blob in the thresholded
+image, measures its diameter in pixels, and derives `px-per-mm` from that
+instead of from `--dpi` (which is ignored when this is set). The coin itself
+is excluded from grain counting — it gets no green outline or red centroid
+dot — and is instead marked with a cyan cross in the annotated image, so
+you can see at a glance which blob the scale came from.
+
+This only works reliably if the coin is clearly the largest circular object
+in the scan — a big clump of unsplit touching grains is unlikely to be
+mistaken for it (those pinch into a non-circular "peanut" shape, see "How it
+works" above), but a stray circular grain could be if no coin is actually
+present. If no sufficiently circular blob is found at all, that image is
+reported as failed rather than silently falling back to `--dpi`.
 
 ### Output files
 
@@ -433,8 +464,10 @@ subprocess, streams its log output live, then loads the resulting
 - **Add Files... / Add Folder...** — pick individual scans, or grab every
   `.jpg`/`.png`/`.tif` in a folder at once (single file or batch, same as
   the CLI).
-- Options panel mirrors the CLI flags: DPI, output folder, area bounds,
-  polarity, watershed on/off with the three seed-tuning fields
+- Options panel mirrors the CLI flags: DPI, a coin diameter field (spinbox,
+  `0` = off; when set, it overrides DPI the same way `--coin-diameter-mm`
+  does on the CLI), output folder, area/width/length bounds, polarity,
+  watershed on/off with the three seed-tuning fields
   (separation/merge/crease-closing), the min-solidity shape check
   (spinbox, `0` = off, matching the CLI default), border exclusion,
   `--color-seeds` and `--show-ids` checkboxes, thread count, and debug

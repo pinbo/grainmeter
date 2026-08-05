@@ -48,7 +48,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
 APP_NAME="Grainmeter"
-VERSION="${GRAINMETER_VERSION:-1.3.0}"
+VERSION="${GRAINMETER_VERSION}"
 DMG_NAME="grainmeter-${VERSION}-macos.dmg"
 
 APP_BUNDLE="${BUILD_DIR}/gui/grainmeter-gui.app"

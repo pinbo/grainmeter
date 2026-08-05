@@ -71,6 +71,9 @@ private:
     QDoubleSpinBox* m_dpiSpin = nullptr;
     QDoubleSpinBox* m_minAreaSpin = nullptr;
     QDoubleSpinBox* m_maxAreaSpin = nullptr;
+    QDoubleSpinBox* m_minWidthSpin = nullptr;
+    QDoubleSpinBox* m_minLengthSpin = nullptr;
+    QDoubleSpinBox* m_coinDiameterSpin = nullptr;
     QComboBox* m_polarityCombo = nullptr;
     QCheckBox* m_watershedCheck = nullptr;
     QDoubleSpinBox* m_seedSeparationSpin = nullptr;

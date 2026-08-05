@@ -77,6 +77,10 @@ struct Options {
     double dpi = 300.0;
     double minAreaMm2 = 3.0;    // reject specks/noise smaller than this
     double maxAreaMm2 = 20.0;   // regions bigger than this get re-split (tighter seed spacing); kept as-is if that fails
+    double minWidthMm = 1.0;    // reject regions narrower (short side of minAreaRect) than this
+    double minLengthMm = 2.0;   // reject regions shorter (long side of minAreaRect) than this
+    double coinDiameterMm = 0.0; // >0: find the biggest circular blob (a reference coin) and use its
+                                  // pixel diameter to derive px_per_mm, overriding --dpi
     bool excludeBorder = true;
     bool useWatershed = true;
     std::string polarity = "auto"; // auto | dark | light  (grain vs background)
@@ -117,7 +121,7 @@ static void say(std::ostream& os, const std::string& s) {
     os << s;
 }
 
-static const char* GRAINMETER_VERSION = "1.3.0";
+static const char* GRAINMETER_VERSION = "1.4.0";
 
 static void printUsage(const char* prog) {
     std::cout <<
@@ -148,6 +152,17 @@ static void printUsage(const char* prog) {
         "                            cluster), not discarded; if splitting still isn't\n"
         "                            possible they're kept as one oversized region\n"
         "                            (default 20.0)\n"
+        "  --min-width-mm <n>        Reject regions narrower (short side of the\n"
+        "                            rotated bounding box) than this (default 1.0)\n"
+        "  --min-length-mm <n>       Reject regions shorter (long side of the\n"
+        "                            rotated bounding box) than this (default 2.0)\n"
+        "  --coin-diameter-mm <n>    Place a coin (or other reference circle) next\n"
+        "                            to the grains in the scan; the biggest circular\n"
+        "                            blob found in the image is assumed to be it, its\n"
+        "                            diameter in pixels is measured, and this value is\n"
+        "                            used to derive px-per-mm, overriding --dpi. The\n"
+        "                            coin itself is excluded from grain counting.\n"
+        "                            (default 0, i.e. off -- use --dpi instead)\n"
         "  --polarity <auto|dark|light>  Are grains darker or lighter than the\n"
         "                            background? (default auto-detect)\n"
         "  --no-watershed           Disable splitting of touching grains\n"
@@ -216,6 +231,9 @@ static bool parseArgs(int argc, char** argv, Options& o) {
         else if (a == "--dpi") o.dpi = std::stod(next("--dpi"));
         else if (a == "--min-area-mm2") o.minAreaMm2 = std::stod(next("--min-area-mm2"));
         else if (a == "--max-area-mm2") o.maxAreaMm2 = std::stod(next("--max-area-mm2"));
+        else if (a == "--min-width-mm") o.minWidthMm = std::stod(next("--min-width-mm"));
+        else if (a == "--min-length-mm") o.minLengthMm = std::stod(next("--min-length-mm"));
+        else if (a == "--coin-diameter-mm") o.coinDiameterMm = std::stod(next("--coin-diameter-mm"));
         else if (a == "--polarity") o.polarity = next("--polarity");
         else if (a == "--no-watershed") o.useWatershed = false;
         else if (a == "--include-border") o.excludeBorder = false;
@@ -357,6 +375,40 @@ static cv::Mat autoThreshold(const cv::Mat& gray, const std::string& polarity, b
     bool chooseDark = (fracDark < fracLight); // grains darker than background => background is light
     outBackgroundIsDark = !chooseDark;
     return chooseDark ? binDark : binLight;
+}
+
+// For --coin-diameter-mm: find the biggest sufficiently-circular blob in a
+// pre-watershed binary mask, assumed to be a reference coin placed next to
+// the grains. Picking by "biggest circular" rather than just "biggest"
+// avoids being fooled by an oversized cluster of touching grains, which is
+// common but essentially never circular -- two touching grains pinch into a
+// concave "peanut" shape (see the solidity comment in measureGrainRegion),
+// which drags circularity well below a real coin's.
+static bool findCoinContour(const cv::Mat& binaryMask, double minCircularity,
+                             std::vector<cv::Point>& outContour, double& outAreaPx) {
+    std::vector<std::vector<cv::Point>> contours;
+    cv::findContours(binaryMask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+
+    bool found = false;
+    double bestArea = 0.0;
+    const std::vector<cv::Point>* best = nullptr;
+    for (auto& c : contours) {
+        double area = cv::contourArea(c);
+        if (area < 20) continue; // ignore tiny noise specks
+        double perimeter = cv::arcLength(c, true);
+        if (perimeter <= 0) continue;
+        double circularity = (4.0 * CV_PI * area) / (perimeter * perimeter);
+        if (circularity < minCircularity) continue;
+        if (area > bestArea) {
+            bestArea = area;
+            best = &c;
+            found = true;
+        }
+    }
+    if (!found) return false;
+    outContour = *best;
+    outAreaPx = bestArea;
+    return true;
 }
 
 // Split touching grains with a distance-transform + marker-based watershed.
@@ -749,8 +801,10 @@ static ImageResult processImage(const std::string& inputPath, const Options& opt
         return result;
     }
 
-    const double pxPerMm = opt.dpi / 25.4;
-    const double mm2PerPx2 = 1.0 / (pxPerMm * pxPerMm);
+    // Overwritten below if --coin-diameter-mm is set, once the reference
+    // coin has been found and measured.
+    double pxPerMm = opt.dpi / 25.4;
+    double mm2PerPx2 = 1.0 / (pxPerMm * pxPerMm);
 
     cv::Mat gray;
     cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
@@ -770,9 +824,64 @@ static ImageResult processImage(const std::string& inputPath, const Options& opt
 
     if (opt.debug) cv::imwrite(tag + "_debug_binary.png", binary);
 
+    bool coinFound = false;
+    cv::Point2f coinCenter;
+    double coinDiameterPxFound = 0.0;
+
+    if (opt.coinDiameterMm > 0.0) {
+        const double kMinCoinCircularity = 0.85;
+        std::vector<cv::Point> coinContour;
+        double coinAreaPx = 0.0;
+        if (!findCoinContour(binary, kMinCoinCircularity, coinContour, coinAreaPx)) {
+            result.error = "--coin-diameter-mm given but no circular reference coin was "
+                            "found in '" + inputPath + "'; make sure a round coin is "
+                            "visible and fully within the scanned area";
+            say(std::cerr, "Error: " + result.error + "\n");
+            return result;
+        }
+        double coinDiameterPx = 2.0 * std::sqrt(coinAreaPx / CV_PI);
+        pxPerMm = coinDiameterPx / opt.coinDiameterMm;
+        mm2PerPx2 = 1.0 / (pxPerMm * pxPerMm);
+
+        cv::Moments coinMoments = cv::moments(coinContour);
+        coinFound = coinMoments.m00 > 0;
+        if (coinFound) {
+            coinCenter = cv::Point2f(static_cast<float>(coinMoments.m10 / coinMoments.m00),
+                                      static_cast<float>(coinMoments.m01 / coinMoments.m00));
+            coinDiameterPxFound = coinDiameterPx;
+        }
+
+        // Remove the coin from the binary mask (with a small safety margin
+        // via the existing 3x3 kernel) so it's never picked up as a grain.
+        cv::Mat coinMask = cv::Mat::zeros(binary.size(), CV_8U);
+        std::vector<std::vector<cv::Point>> coinContours = {coinContour};
+        cv::drawContours(coinMask, coinContours, -1, cv::Scalar(255), cv::FILLED);
+        cv::dilate(coinMask, coinMask, kernel, cv::Point(-1, -1), 3);
+        binary.setTo(0, coinMask);
+
+        std::ostringstream ss;
+        ss << "[" << tag << "] Coin detected: diameter=" << std::fixed << std::setprecision(1)
+           << coinDiameterPx << "px -> " << std::setprecision(3) << pxPerMm
+           << " px/mm (overriding --dpi)\n";
+        say(std::cerr, ss.str());
+    }
+
     std::vector<Grain> grains;
     cv::Mat annotated = bgr.clone();
     int oversizedBeforeSplitCount = 0;
+
+    if (coinFound) {
+        // Mark the reference coin in the annotated image with a cyan cross
+        // so it's clear at a glance which blob the scale came from, and
+        // that it's deliberately excluded from the grain outlines/dots.
+        cv::Scalar cyan(255, 255, 0); // BGR
+        double armLen = std::max(10.0, coinDiameterPxFound * 0.35);
+        int thickness = std::max(2, static_cast<int>(std::lround(coinDiameterPxFound * 0.02)));
+        cv::line(annotated, coinCenter + cv::Point2f(-armLen, 0), coinCenter + cv::Point2f(armLen, 0),
+                 cyan, thickness, cv::LINE_AA);
+        cv::line(annotated, coinCenter + cv::Point2f(0, -armLen), coinCenter + cv::Point2f(0, armLen),
+                 cyan, thickness, cv::LINE_AA);
+    }
 
     if (opt.useWatershed) {
         say(std::cerr, "[" + tag + "] Splitting touching grains (watershed)...\n");
@@ -833,9 +942,11 @@ static ImageResult processImage(const std::string& inputPath, const Options& opt
 
     say(std::cerr, "[" + tag + "] Filtering and writing results...\n");
     std::vector<Grain> kept;
-    int rejectedSize = 0, rejectedBorder = 0, stillOversized = 0, stillNotOvalShaped = 0;
+    int rejectedSize = 0, rejectedShape = 0, rejectedBorder = 0, stillOversized = 0, stillNotOvalShaped = 0;
     for (auto& g : grains) {
         double areaMm2 = g.areaPx * mm2PerPx2;
+        double lengthMm = g.lengthPx / pxPerMm;
+        double widthMm = g.widthPx / pxPerMm;
         // Oversized/non-oval-shaped regions were already given a chance to
         // split in processRegionRecursive() above (watershed branch) --
         // they are no longer rejected here, only counted, since the point
@@ -843,6 +954,7 @@ static ImageResult processImage(const std::string& inputPath, const Options& opt
         // rather than discard them. Only undersized regions (dust/debris)
         // are dropped.
         if (areaMm2 < opt.minAreaMm2) { rejectedSize++; continue; }
+        if (lengthMm < opt.minLengthMm || widthMm < opt.minWidthMm) { rejectedShape++; continue; }
         if (opt.excludeBorder && g.touchesBorder) { rejectedBorder++; continue; }
         if (areaMm2 > opt.maxAreaMm2) stillOversized++;
         if (opt.minSolidity > 0.0 && g.solidity < opt.minSolidity) stillNotOvalShaped++;
@@ -976,6 +1088,7 @@ static ImageResult processImage(const std::string& inputPath, const Options& opt
     out << "\n=== " << inputPath << " ===\n";
     out << "Grains detected (raw blobs):        " << grains.size() << "\n";
     out << "Rejected (too small):               " << rejectedSize << "\n";
+    out << "Rejected (too narrow/short):         " << rejectedShape << "\n";
     if (opt.excludeBorder)
         out << "Rejected (touching image border):   " << rejectedBorder << "\n";
     if (oversizedBeforeSplitCount > 0)

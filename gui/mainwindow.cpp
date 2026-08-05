@@ -136,6 +136,20 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     m_dpiSpin->setSuffix(" dpi");
     form->addRow("Scan resolution:", m_dpiSpin);
 
+    m_coinDiameterSpin = new QDoubleSpinBox(optionsGroup);
+    m_coinDiameterSpin->setRange(0.0, 100.0);
+    m_coinDiameterSpin->setSingleStep(0.1);
+    m_coinDiameterSpin->setValue(0.0);
+    m_coinDiameterSpin->setSuffix(" mm");
+    m_coinDiameterSpin->setSpecialValueText("0 (off, use DPI)");
+    m_coinDiameterSpin->setToolTip(
+        "Place a coin (or other reference circle) next to the grains in\n"
+        "the scan. The biggest circular blob found in the image is\n"
+        "assumed to be it; its pixel diameter is measured and used to\n"
+        "derive px-per-mm, overriding the scan resolution above. The\n"
+        "coin itself is excluded from grain counting.");
+    form->addRow("Coin diameter (overrides DPI):", m_coinDiameterSpin);
+
     m_minAreaSpin = new QDoubleSpinBox(optionsGroup);
     m_minAreaSpin->setRange(0, 10000);
     m_minAreaSpin->setValue(3.0);
@@ -152,6 +166,18 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         "(tighter seed spacing) rather than being discarded. If no\n"
         "split is found, the region is kept as-is (not dropped).");
     form->addRow("Max grain area (re-split above this):", m_maxAreaSpin);
+
+    m_minWidthSpin = new QDoubleSpinBox(optionsGroup);
+    m_minWidthSpin->setRange(0, 1000);
+    m_minWidthSpin->setValue(1.0);
+    m_minWidthSpin->setSuffix(" mm");
+    form->addRow("Min grain width:", m_minWidthSpin);
+
+    m_minLengthSpin = new QDoubleSpinBox(optionsGroup);
+    m_minLengthSpin->setRange(0, 1000);
+    m_minLengthSpin->setValue(2.0);
+    m_minLengthSpin->setSuffix(" mm");
+    form->addRow("Min grain length:", m_minLengthSpin);
 
     m_polarityCombo = new QComboBox(optionsGroup);
     m_polarityCombo->addItems({"auto", "dark", "light"});
@@ -436,6 +462,9 @@ void MainWindow::onRun() {
     args << "--out-dir" << m_outDirEdit->text();
     args << "--min-area-mm2" << QString::number(m_minAreaSpin->value());
     args << "--max-area-mm2" << QString::number(m_maxAreaSpin->value());
+    args << "--min-width-mm" << QString::number(m_minWidthSpin->value());
+    args << "--min-length-mm" << QString::number(m_minLengthSpin->value());
+    if (m_coinDiameterSpin->value() > 0.0) args << "--coin-diameter-mm" << QString::number(m_coinDiameterSpin->value());
     args << "--polarity" << m_polarityCombo->currentText();
     if (!m_watershedCheck->isChecked()) args << "--no-watershed";
     args << "--seed-separation-mm" << QString::number(m_seedSeparationSpin->value());
