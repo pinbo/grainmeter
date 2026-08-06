@@ -88,7 +88,7 @@ struct Options {
     // for what each one does and which direction to adjust it.
     double seedSeparationMm = 2.0;  // min distance enforced between distinct seed peaks
     double seedMergeMm = 2.0;       // merge distance for same-peak "salt" -- raise if grains still over-split
-    double creaseCloseMm = 0.6;     // pre-seeding closing to bridge creases/notches within one grain
+    double creaseCloseMm = 0.0;     // pre-seeding closing to bridge creases/notches within one grain (off by default; raise if a visible crease is splitting grains into two)
     double minSolidity = 0.0;       // region convexity (area / convex-hull area) below this triggers a forced re-split attempt; 0 disables this check (off by default -- see README for why 0.75 wasn't safe as a default)
     bool colorSeeds = false;        // give each grain a distinct fill/outline color in the annotated image (off by default; a single green outline is easier to read for most uses)
     bool showIds = false;           // draw each grain's id number in the annotated image (off by default; the numbers get busy on dense scans -- the outline/dot/color alone is usually enough for a QC pass)
@@ -178,10 +178,10 @@ static void printUsage(const char* prog) {
         "                            debug_sure_fg.png -- it's the most common fix.\n"
         "  --crease-close-mm <n>     Pre-seeding gap-closing size, to bridge a grain's\n"
         "                            own crease/notch before it can register as two\n"
-        "                            peaks (default 0.6). Set to 0 to disable. Raise\n"
-        "                            if a visible crease is still splitting grains;\n"
-        "                            lower (or disable) if grains that genuinely\n"
-        "                            touch are being merged into one.\n"
+        "                            peaks (default 0, i.e. off). Raise (e.g. 0.6) if\n"
+        "                            a visible crease is splitting grains into two;\n"
+        "                            lower back down if grains that genuinely touch\n"
+        "                            are being merged into one.\n"
         "  --min-solidity <n>        Regions less convex/oval-shaped than this\n"
         "                            (contour area / convex-hull area) get a forced\n"
         "                            re-split attempt even if their area looks\n"

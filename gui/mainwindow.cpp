@@ -218,13 +218,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     m_creaseCloseSpin = new QDoubleSpinBox(optionsGroup);
     m_creaseCloseSpin->setRange(0.0, 20.0);
     m_creaseCloseSpin->setSingleStep(0.1);
-    m_creaseCloseSpin->setValue(0.6);
+    m_creaseCloseSpin->setValue(0.0);
     m_creaseCloseSpin->setSuffix(" mm");
     m_creaseCloseSpin->setToolTip(
         "Bridges a grain's own crease/notch before it can register\n"
-        "as two seed peaks (e.g. a wheat kernel's sulcus). Set to 0\n"
-        "to disable. Raise if a visible crease still splits grains;\n"
-        "lower if grains that genuinely touch are being merged.");
+        "as two seed peaks (e.g. a wheat kernel's sulcus). Off (0)\n"
+        "by default. Raise (e.g. 0.6) if a visible crease is\n"
+        "splitting grains into two; lower back down if grains that\n"
+        "genuinely touch are being merged into one.");
     form->addRow("Crease closing:", m_creaseCloseSpin);
 
     m_minSoliditySpin = new QDoubleSpinBox(optionsGroup);
